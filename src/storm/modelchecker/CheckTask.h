@@ -38,6 +38,7 @@ class CheckTask {
     CheckTask(FormulaType const& formula, bool onlyInitialStatesRelevant = false) : formula(formula), hint(new ModelCheckerHint()) {
         this->onlyInitialStatesRelevant = onlyInitialStatesRelevant;
         this->produceSchedulers = false;
+        this->produceCertificate = false;
         this->qualitative = false;
         this->robustUncertainty = true;
 
@@ -51,8 +52,8 @@ class CheckTask {
     template<typename NewFormulaType>
     CheckTask<NewFormulaType, ValueType> substituteFormula(NewFormulaType const& newFormula) const {
         CheckTask<NewFormulaType, ValueType> result(newFormula, this->optimizationDirection, this->playerCoalition, this->rewardModel,
-                                                    this->onlyInitialStatesRelevant, this->bound, this->qualitative, this->produceSchedulers, this->hint,
-                                                    this->robustUncertainty);
+                                                    this->onlyInitialStatesRelevant, this->bound, this->qualitative, this->produceSchedulers,
+                                                    this->produceCertificate, this->hint, this->robustUncertainty);
         result.updateOperatorInformation();
         return result;
     }
@@ -130,8 +131,8 @@ class CheckTask {
     template<typename NewValueType>
     CheckTask<FormulaType, NewValueType> convertValueType() const {
         return CheckTask<FormulaType, NewValueType>(this->formula, this->optimizationDirection, this->playerCoalition, this->rewardModel,
-                                                    this->onlyInitialStatesRelevant, this->bound, this->qualitative, this->produceSchedulers, this->hint,
-                                                    this->robustUncertainty);
+                                                    this->onlyInitialStatesRelevant, this->bound, this->qualitative, this->produceSchedulers,
+                                                    this->produceCertificate, this->hint, this->robustUncertainty);
     }
 
     /*!
@@ -281,6 +282,20 @@ class CheckTask {
     }
 
     /*!
+     * Sets whether to produce certificates (if supported).
+     */
+    void setProduceCertificate(bool produceCertificate = true) {
+        this->produceCertificate = produceCertificate;
+    }
+
+    /*!
+     * Retrieves whether certificate(s) are to be produced (if supported).
+     */
+    bool isProduceCertificateSet() const {
+        return produceCertificate;
+    }
+
+    /*!
      * sets a hint that might contain information that speeds up the modelchecking process (if supported by the model checker)
      */
     void setHint(std::shared_ptr<ModelCheckerHint> const& hint) {
@@ -328,11 +343,12 @@ class CheckTask {
      * with bounds 0/1.
      * @param produceSchedulers If supported by the model checker and the model formalism, schedulers to achieve
      * a value will be produced if this flag is set.
+     * @param produceCertificate If supported by the model checker and the model formalism, a certificate is produced if this flag is set
      */
     CheckTask(std::reference_wrapper<FormulaType const> const& formula, boost::optional<storm::OptimizationDirection> const& optimizationDirection,
               boost::optional<storm::logic::PlayerCoalition> playerCoalition, boost::optional<std::string> const& rewardModel, bool onlyInitialStatesRelevant,
-              boost::optional<storm::logic::Bound> const& bound, bool qualitative, bool produceSchedulers, std::shared_ptr<ModelCheckerHint> const& hint,
-              bool robust)
+              boost::optional<storm::logic::Bound> const& bound, bool qualitative, bool produceSchedulers, bool produceCertificate,
+              std::shared_ptr<ModelCheckerHint> const& hint, bool robust)
         : formula(formula),
           optimizationDirection(optimizationDirection),
           playerCoalition(playerCoalition),
@@ -341,6 +357,7 @@ class CheckTask {
           bound(bound),
           qualitative(qualitative),
           produceSchedulers(produceSchedulers),
+          produceCertificate(produceCertificate),
           hint(hint),
           robustUncertainty(robust) {
         // Intentionally left empty.
@@ -370,6 +387,9 @@ class CheckTask {
     // If supported by the model checker and the model formalism, schedulers to achieve a value will be produced
     // if this flag is set.
     bool produceSchedulers;
+
+    // If supported by the model checker and the model formalisms, a certificate is produced if this flag is set.
+    bool produceCertificate;
 
     // A hint that might contain information that speeds up the modelchecking process (if supported by the model checker)
     std::shared_ptr<ModelCheckerHint> hint;

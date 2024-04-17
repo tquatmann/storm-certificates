@@ -30,6 +30,7 @@
 
 #include "storm/exceptions/OptionParserException.h"
 
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/SymbolicQualitativeCheckResult.h"
 
 #include "storm/models/sparse/StandardRewardModel.h"
@@ -39,6 +40,7 @@
 #include "storm/settings/SettingsManager.h"
 #include "storm/settings/modules/AbstractionSettings.h"
 #include "storm/settings/modules/BuildSettings.h"
+#include "storm/settings/modules/CertificationSettings.h"
 #include "storm/settings/modules/CoreSettings.h"
 #include "storm/settings/modules/DebugSettings.h"
 #include "storm/settings/modules/HintSettings.h"
@@ -1204,12 +1206,16 @@ template<typename ValueType>
 void verifyWithSparseEngine(std::shared_ptr<storm::models::ModelBase> const& model, SymbolicInput const& input, ModelProcessingInformation const& mpi) {
     auto sparseModel = model->as<storm::models::sparse::Model<ValueType>>();
     auto const& ioSettings = storm::settings::getModule<storm::settings::modules::IOSettings>();
-    auto verificationCallback = [&sparseModel, &ioSettings, &mpi](std::shared_ptr<storm::logic::Formula const> const& formula,
-                                                                  std::shared_ptr<storm::logic::Formula const> const& states) {
+    auto const& certificationSettings = storm::settings::getModule<storm::settings::modules::CertificationSettings>();
+    auto verificationCallback = [&sparseModel, &ioSettings, &mpi, &certificationSettings](std::shared_ptr<storm::logic::Formula const> const& formula,
+                                                                                          std::shared_ptr<storm::logic::Formula const> const& states) {
         bool filterForInitialStates = states->isInitialFormula();
         auto task = storm::api::createTask<ValueType>(formula, filterForInitialStates);
         if (ioSettings.isExportSchedulerSet()) {
             task.setProduceSchedulers(true);
+        }
+        if (certificationSettings.isProduceCertificateSet()) {
+            task.setProduceCertificate(true);
         }
         std::unique_ptr<storm::modelchecker::CheckResult> result = storm::api::verifyWithSparseEngine<ValueType>(mpi.env, sparseModel, task);
 
@@ -1226,6 +1232,15 @@ void verifyWithSparseEngine(std::shared_ptr<storm::models::ModelBase> const& mod
     };
     uint64_t exportCount = 0;  // this number will be prepended to the export file name of schedulers and/or check results in case of multiple properties.
     auto postprocessingCallback = [&sparseModel, &ioSettings, &input, &exportCount](std::unique_ptr<storm::modelchecker::CheckResult> const& result) {
+        if (result->isExplicitCertificateCheckResult()) {
+            if constexpr (!std::is_same_v<ValueType, storm::RationalFunction>) {
+                STORM_PRINT_AND_LOG("Certificate validity check ... ")
+                storm::utility::Stopwatch chkValid(true);
+                bool const valid = result->template asExplicitCertificateCheckResult<ValueType>().checkValidity(*sparseModel);
+                chkValid.stop();
+                STORM_PRINT_AND_LOG((valid ? "valid" : "invalid") << " (time: " << chkValid << ")\n");
+            }
+        }
         if (ioSettings.isExportSchedulerSet()) {
             if (result->isExplicitQuantitativeCheckResult()) {
                 if (result->template asExplicitQuantitativeCheckResult<ValueType>().hasScheduler()) {

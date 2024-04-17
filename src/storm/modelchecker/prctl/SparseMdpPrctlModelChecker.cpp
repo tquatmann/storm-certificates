@@ -6,6 +6,7 @@
 #include "storm/utility/macros.h"
 #include "storm/utility/vector.h"
 
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/ExplicitParetoCurveCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
@@ -15,6 +16,7 @@
 
 #include "storm/models/sparse/StandardRewardModel.h"
 
+#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
 #include "storm/modelchecker/helper/finitehorizon/SparseNondeterministicStepBoundedHorizonHelper.h"
 #include "storm/modelchecker/helper/infinitehorizon/SparseNondeterministicInfiniteHorizonHelper.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
@@ -180,15 +182,31 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
     std::unique_ptr<CheckResult> rightResultPointer = this->check(env, pathFormula.getRightSubformula());
     ExplicitQualitativeCheckResult const& leftResult = leftResultPointer->asExplicitQualitativeCheckResult();
     ExplicitQualitativeCheckResult const& rightResult = rightResultPointer->asExplicitQualitativeCheckResult();
-    auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeUntilProbabilities(
-        env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), leftResult.getTruthValuesVector(), rightResult.getTruthValuesVector(), checkTask.isQualitativeSet(),
-        checkTask.isProduceSchedulersSet(), checkTask.getHint());
-    std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
-    if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
-        result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability probabilities with certificate ...");
+        if constexpr (std::is_same_v<ValueType, storm::Interval>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
+        } else {
+            STORM_LOG_WARN_COND(!checkTask.isProduceSchedulersSet(), "Scheduler generation with certificates not implemented.");
+            STORM_LOG_THROW(leftResult.getTruthValuesVector().full(), storm::exceptions::NotImplementedException,
+                            "Reachability probability certificates not implemented for constrained reachability (aka Until formulas)");
+            auto certificate = storm::modelchecker::computeReachabilityProbabilityCertificate(
+                env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), rightResult.getTruthValuesVector(),
+                pathFormula.getRightSubformula().toString());
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeUntilProbabilities(
+            env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), leftResult.getTruthValuesVector(), rightResult.getTruthValuesVector(), checkTask.isQualitativeSet(),
+            checkTask.isProduceSchedulersSet(), checkTask.getHint());
+        std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
+        if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
+            result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+        }
+        return result;
     }
-    return result;
 }
 
 template<typename SparseMdpModelType>
