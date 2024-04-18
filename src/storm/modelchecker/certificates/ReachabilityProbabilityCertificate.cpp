@@ -61,8 +61,10 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
         }
         STORM_LOG_ASSERT(!stateValue.empty(), "Bellman operator failed to compute value for state " << state << " since the row group is empty.");
         if (*stateValue > values[state]) {
-            STORM_LOG_WARN("Certificate invalid because upper bound is not inductive. At state "
-                           << state << " the Bellman operator yields " << *stateValue << " but the certificate has smaller value " << values[state] << ".");
+            double const approxDiff = storm::utility::convertNumber<double, ValueType>(*stateValue - values[state]);
+            STORM_LOG_WARN("Certificate invalid because upper bound is not inductive. At state " << state << " the Bellman operator yields " << *stateValue
+                                                                                                 << " but the certificate has smaller value " << values[state]
+                                                                                                 << ". Approx. diff is " << approxDiff << ".");
             return false;
         }
     }
@@ -119,8 +121,10 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
         }
         STORM_LOG_ASSERT(!stateValue.empty(), "Bellman operator failed to compute value for state " << state << " since the row group is empty.");
         if (*stateValue < values[state]) {
-            STORM_LOG_WARN("Certificate invalid because upper bound is not inductive. At state "
-                           << state << " the Bellman operator yields " << *stateValue << " but the certificate has smaller value " << values[state] << ".");
+            double const approxDiff = storm::utility::convertNumber<double, ValueType>(values[state] - *stateValue);
+            STORM_LOG_WARN("Certificate invalid because lower bound is not inductive. At state " << state << " the Bellman operator yields " << *stateValue
+                                                                                                 << " but the certificate has larger value " << values[state]
+                                                                                                 << ". Approx. diff is " << approxDiff << ".");
             return false;
         }
         STORM_LOG_ASSERT(!stateRankMinusOne.empty(), "Ranking operator failed to compute rank for state " << state << ".");
