@@ -2,6 +2,7 @@
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
+#include <functional>
 
 #include "storm/adapters/JsonAdapter.h"
 #include "storm/adapters/RationalFunctionAdapter.h"
@@ -605,6 +606,73 @@ void Model<ValueType, RewardModelType>::writeJsonToStream(std::ostream& outStrea
 template<>
 void Model<double, storm::models::sparse::StandardRewardModel<storm::Interval>>::writeJsonToStream(std::ostream&) const {
     STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "Json export not implemented for this model type.");
+}
+
+template<typename ValueType>
+void writeCemToStream(std::ostream& outStream, storm::storage::SparseMatrix<ValueType> const& probabilityMatrix,
+                      std::function<ValueType(uint64_t, uint64_t)> const& choiceRewards) {
+    // Header
+    outStream << probabilityMatrix.getRowGroupCount() << "\n";
+    outStream << probabilityMatrix.getSizeOfLargestRowGroup() << "\n";
+    // Matrix entries and rewards
+    for (uint64_t state = 0; state < probabilityMatrix.getRowGroupCount(); ++state) {
+        for (uint64_t localChoice = 0; localChoice < probabilityMatrix.getRowGroupSize(state); ++localChoice) {
+            outStream << state << " " << localChoice;
+            for (auto const& entry : probabilityMatrix.getRow(state, localChoice)) {
+                if (storm::utility::isZero(entry.getValue())) {
+                    continue;
+                }
+                outStream << " (" << entry.getColumn() << " " << entry.getValue() << ")";
+            }
+            if (choiceRewards) {
+                outStream << " " << choiceRewards(state, localChoice) << "\n";
+            } else {
+                outStream << " 0\n";
+            }
+        }
+    }
+}
+
+template<typename ValueType, typename RewardModelType>
+void Model<ValueType, RewardModelType>::writeCemToStream(std::ostream& outStream) const {
+    if constexpr (std::is_same_v<ValueType, storm::Interval> || std::is_same_v<typename RewardModelType::ValueType, storm::Interval>) {
+        STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "CEM export not implemented for this model type.");
+    } else {
+        // First write some useful information to the file and potentially issue useful warnings
+        STORM_LOG_WARN_COND(this->getNumberOfStates() < 10000 && this->getNumberOfTransitions() < 100000,
+                            "Exporting a large model to CEM. This might take some time and will result in a very large file.");
+        outStream << "# " << this->getType() << " model with " << this->getNumberOfStates() << " states and " << this->getNumberOfTransitions()
+                  << " transitions obtained with Storm\n";
+        bool const isSupportedType =
+            this->isOfType(ModelType::Dtmc) || this->isOfType(ModelType::Ctmc) || this->isOfType(ModelType::Mdp) || this->isOfType(ModelType::MarkovAutomaton);
+        if (!isSupportedType) {
+            STORM_LOG_WARN("Exporting a model of type " << this->getType() << " to CEM. This might not be supported.");
+            outStream << "# WARN: Exporting a model of this type might not be fully supported\n";
+        }
+        if (!this->isDiscreteTimeModel()) {
+            // We currently don't know how to represent exit rates, and it is unclear how action and state rewards are merged into a single number per choice
+            STORM_LOG_WARN("Exporting a continuous time model of type " << this->getType()
+                                                                        << " to CEM. The export will not contain exit rates and rewards are potentially off.");
+            outStream << "# WARN: continuous time model is exported without exit rate information and the rewards are potentially off\n";
+        }
+        std::function<ValueType(uint64_t, uint64_t)> choiceRewards;
+        if (this->hasRewardModel()) {
+            STORM_LOG_WARN_COND(this->hasUniqueRewardModel(), "The model considers multiple reward models. Only the first one (named \""
+                                                                  << this->getRewardModels().begin()->first << "\") is exported to CEM.");
+            outStream << "# Reward model \"" << this->getRewardModels().begin()->first << "\"\n";
+            choiceRewards = [this](uint64_t state, uint64_t localChoice) -> ValueType {
+                return this->getRewardModels().begin()->second.getTotalStateActionReward(
+                    state, this->getTransitionMatrix().getRowGroupIndices()[state] + localChoice, this->getTransitionMatrix());
+            };
+        }
+
+        if (this->isOfType(ModelType::Ctmc)) {
+            auto const& ctmc = this->template as<storm::models::sparse::Ctmc<ValueType, RewardModelType>>();
+            ::storm::models::sparse::writeCemToStream(outStream, ctmc->computeProbabilityMatrix(), choiceRewards);
+        } else {
+            ::storm::models::sparse::writeCemToStream(outStream, this->getTransitionMatrix(), choiceRewards);
+        }
+    }
 }
 
 template<typename ValueType, typename RewardModelType>

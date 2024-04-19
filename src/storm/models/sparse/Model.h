@@ -362,6 +362,11 @@ class Model : public storm::models::Model<CValueType> {
     virtual void writeJsonToStream(std::ostream& outStream) const;
 
     /*!
+     * Writes a representation of the model in CEM (certifiable explicit Markov model) format to the given stream
+     */
+    virtual void writeCemToStream(std::ostream& outStream) const;
+
+    /*!
      * Retrieves the set of labels attached to the given state.
      *
      * @param state The state whose labels to retrieve.
