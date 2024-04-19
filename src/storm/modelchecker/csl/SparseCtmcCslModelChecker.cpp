@@ -12,9 +12,11 @@
 #include "storm/utility/graph.h"
 #include "storm/utility/macros.h"
 
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
 
+#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
 
 #include "storm/logic/FragmentSpecification.h"
@@ -115,11 +117,26 @@ std::unique_ptr<CheckResult> SparseCtmcCslModelChecker<SparseCtmcModelType>::com
     std::unique_ptr<CheckResult> rightResultPointer = this->check(env, pathFormula.getRightSubformula());
     ExplicitQualitativeCheckResult const& leftResult = leftResultPointer->asExplicitQualitativeCheckResult();
     ExplicitQualitativeCheckResult const& rightResult = rightResultPointer->asExplicitQualitativeCheckResult();
-    std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeUntilProbabilities(
-        env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), leftResult.getTruthValuesVector(), rightResult.getTruthValuesVector(),
-        checkTask.isQualitativeSet());
-    return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    if (checkTask.isProduceCertificateSet()) {
+        if constexpr (std::is_same_v<ValueType, storm::RationalFunction>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates for parametric models");
+        } else {
+            STORM_LOG_INFO("Computing reachability probabilities with certificate ...");
+            STORM_LOG_THROW(leftResult.getTruthValuesVector().full(), storm::exceptions::NotImplementedException,
+                            "Reachability probability certificates not implemented for constrained reachability (aka Until formulas)");
+            auto probabilisticTransitions = this->getModel().computeProbabilityMatrix();
+            auto certificate = storm::modelchecker::computeReachabilityProbabilityCertificate(
+                env, std::nullopt, probabilisticTransitions, rightResult.getTruthValuesVector(), pathFormula.getRightSubformula().toString());
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeUntilProbabilities(
+            env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), leftResult.getTruthValuesVector(),
+            rightResult.getTruthValuesVector(), checkTask.isQualitativeSet());
+        return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    }
 }
 
 template<typename SparseCtmcModelType>

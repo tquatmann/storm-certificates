@@ -2,6 +2,7 @@
 #include "storm/modelchecker/csl/helper/SparseMarkovAutomatonCslHelper.h"
 #include "storm/modelchecker/prctl/helper/SparseMdpPrctlHelper.h"
 
+#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
 #include "storm/modelchecker/helper/infinitehorizon/SparseNondeterministicInfiniteHorizonHelper.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
 #include "storm/modelchecker/helper/utility/SetInformationFromCheckTask.h"
@@ -15,6 +16,7 @@
 
 #include "storm/solver/SolveGoal.h"
 
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
 
@@ -144,15 +146,26 @@ std::unique_ptr<CheckResult> SparseMarkovAutomatonCslModelChecker<SparseMarkovAu
     std::unique_ptr<CheckResult> rightResultPointer = this->check(env, pathFormula.getRightSubformula());
     ExplicitQualitativeCheckResult& leftResult = leftResultPointer->asExplicitQualitativeCheckResult();
     ExplicitQualitativeCheckResult& rightResult = rightResultPointer->asExplicitQualitativeCheckResult();
-
-    auto ret = storm::modelchecker::helper::SparseMarkovAutomatonCslHelper::computeUntilProbabilities(
-        env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), this->getModel().getBackwardTransitions(),
-        leftResult.getTruthValuesVector(), rightResult.getTruthValuesVector(), checkTask.isQualitativeSet(), checkTask.isProduceSchedulersSet());
-    std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<ValueType>(std::move(ret.values)));
-    if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
-        result->asExplicitQuantitativeCheckResult<ValueType>().setScheduler(std::move(ret.scheduler));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability probabilities with certificate ...");
+        STORM_LOG_WARN_COND(!checkTask.isProduceSchedulersSet(), "Scheduler generation with certificates not implemented.");
+        STORM_LOG_THROW(leftResult.getTruthValuesVector().full(), storm::exceptions::NotImplementedException,
+                        "Reachability probability certificates not implemented for constrained reachability (aka Until formulas)");
+        auto certificate =
+            storm::modelchecker::computeReachabilityProbabilityCertificate(env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(),
+                                                                           rightResult.getTruthValuesVector(), pathFormula.getRightSubformula().toString());
+        storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+        return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+    } else {
+        auto ret = storm::modelchecker::helper::SparseMarkovAutomatonCslHelper::computeUntilProbabilities(
+            env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), this->getModel().getBackwardTransitions(),
+            leftResult.getTruthValuesVector(), rightResult.getTruthValuesVector(), checkTask.isQualitativeSet(), checkTask.isProduceSchedulersSet());
+        std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<ValueType>(std::move(ret.values)));
+        if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
+            result->asExplicitQuantitativeCheckResult<ValueType>().setScheduler(std::move(ret.scheduler));
+        }
+        return result;
     }
-    return result;
 }
 
 template<typename SparseMarkovAutomatonModelType>
