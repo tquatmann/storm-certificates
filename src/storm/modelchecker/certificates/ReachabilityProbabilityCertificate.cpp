@@ -11,6 +11,7 @@
 #include "storm/storage/SparseMatrix.h"
 #include "storm/utility/Extremum.h"
 #include "storm/utility/NumberTraits.h"
+#include "storm/utility/OptionalRef.h"
 #include "storm/utility/macros.h"
 
 #include "storm/exceptions/InvalidOperationException.h"
@@ -21,6 +22,21 @@ template<typename ValueType>
 ReachabilityProbabilityCertificate<ValueType>::ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir,
                                                                                   storm::storage::BitVector targetStates, std::string targetLabel)
     : Certificate<ValueType>(CertificateKind::ReachabilityProbability), targetStates(std::move(targetStates)), targetLabel(targetLabel), dir(dir) {}
+
+template<typename ValueType>
+ReachabilityProbabilityCertificate<ValueType>::ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir,
+                                                                                  storm::storage::BitVector targetStates,
+                                                                                  storm::storage::BitVector constraintStates, std::string targetLabel,
+                                                                                  std::string constraintLabel)
+    : Certificate<ValueType>(CertificateKind::ReachabilityProbability),
+      targetStates(std::move(targetStates)),
+      constraintStates(std::move(constraintStates)),
+      targetLabel(targetLabel),
+      constraintLabel(std::move(constraintLabel)),
+      dir(dir) {
+    STORM_LOG_ASSERT(!constraintStates.empty(), "Constraint set given but empty.");
+    STORM_LOG_ASSERT(constraintStates.size() == targetStates.size(), "Constraint set and target set consider a different state count.");
+}
 
 template<typename ValueType>
 bool ReachabilityProbabilityCertificate<ValueType>::checkValidity(storm::models::Model<ValueType> const& model) const {
@@ -44,12 +60,21 @@ bool ReachabilityProbabilityCertificate<ValueType>::checkValidity(storm::models:
 
 template<typename ValueType, OptimizationDirection Dir>
 bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::BitVector const& targetStates,
-                                std::vector<ValueType> const& values) {
+                                storm::OptionalRef<storm::storage::BitVector const> constraintStates, std::vector<ValueType> const& values) {
     for (uint64_t state = 0; state < targetStates.size(); ++state) {
         if (targetStates.get(state)) {
             // Handle target state
             if (values[state] < storm::utility::one<ValueType>()) {
                 STORM_LOG_WARN("Certificate invalid because target state " << state << " has upper bound " << values[state] << " < 1.");
+                return false;
+            }
+            continue;
+        }
+        // Handle states that are not in the constraint set
+        if (constraintStates && !constraintStates->get(state)) {
+            if (values[state] < storm::utility::zero<ValueType>()) {
+                STORM_LOG_WARN("Certificate invalid because state " << state << " is not in the constraint set but has upper bound " << values[state]
+                                                                    << " < 0.");
                 return false;
             }
             continue;
@@ -73,7 +98,7 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
 
 template<typename ValueType, OptimizationDirection Dir>
 bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::BitVector const& targetStates,
-                                std::vector<ValueType> const& values,
+                                storm::OptionalRef<storm::storage::BitVector const> constraintStates, std::vector<ValueType> const& values,
                                 std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType> const& ranks) {
     using RankingType = typename ReachabilityProbabilityCertificate<ValueType>::RankingType;
     auto const InfRank = ReachabilityProbabilityCertificate<ValueType>::InfRank;
@@ -82,6 +107,19 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
         if (targetStates.get(state)) {
             if (values[state] > storm::utility::one<ValueType>()) {
                 STORM_LOG_WARN("Certificate invalid because target state " << state << " has lower bound " << values[state] << " > 1.");
+                return false;
+            }
+            continue;
+        }
+        // Handle states that are not in the constraint set
+        if (constraintStates && !constraintStates->get(state)) {
+            if (values[state] > storm::utility::zero<ValueType>()) {
+                STORM_LOG_WARN("Certificate invalid because state " << state << " is not in the constraint set but has lower bound " << values[state]
+                                                                    << " > 0.");
+                return false;
+            }
+            if (ranks[state] != InfRank) {
+                STORM_LOG_WARN("Certificate invalid because state " << state << " is not in the constraint set but has finite rank " << ranks[state] << ".");
                 return false;
             }
             continue;
@@ -158,12 +196,17 @@ bool ReachabilityProbabilityCertificate<ValueType>::checkValidity(storm::storage
 template<typename ValueType>
 template<storm::OptimizationDirection Dir>
 bool ReachabilityProbabilityCertificate<ValueType>::checkValidityInternal(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix) const {
-    if (hasUpperBoundsCertificate() && !checkUpperBoundCertificate<ValueType, Dir>(transitionProbabilityMatrix, targetStates, upperBoundsCertificate.values)) {
+    storm::OptionalRef<storm::storage::BitVector const> constraintStatesRef;
+    if (hasConstraintStates()) {
+        constraintStatesRef.reset(constraintStates);
+    }
+    if (hasUpperBoundsCertificate() &&
+        !checkUpperBoundCertificate<ValueType, Dir>(transitionProbabilityMatrix, targetStates, constraintStatesRef, upperBoundsCertificate.values)) {
         STORM_LOG_WARN("Certificate invalid because upper bound certificate is violated.");
         return false;
     }
-    if (hasLowerBoundsCertificate() &&
-        !checkLowerBoundCertificate<ValueType, Dir>(transitionProbabilityMatrix, targetStates, lowerBoundsCertificate.values, lowerBoundsCertificate.ranks)) {
+    if (hasLowerBoundsCertificate() && !checkLowerBoundCertificate<ValueType, Dir>(transitionProbabilityMatrix, targetStates, constraintStatesRef,
+                                                                                   lowerBoundsCertificate.values, lowerBoundsCertificate.ranks)) {
         STORM_LOG_WARN("Certificate invalid because lower bound certificate is violated.");
         return false;
     }
@@ -177,6 +220,11 @@ storm::json<ValueType> ReachabilityProbabilityCertificate<ValueType>::toJson() c
     storm::json<ValueType> json;
     // Fill the json object based on your project requirements
     return json;
+}
+
+template<typename ValueType>
+void ReachabilityProbabilityCertificate<ValueType>::exportToStream(std::ostream& out) const {
+    assert(false);
 }
 
 template<typename ValueType>
@@ -227,7 +275,9 @@ std::string ReachabilityProbabilityCertificate<ValueType>::summaryString(storm::
 
 template<typename ValueType>
 std::unique_ptr<Certificate<ValueType>> ReachabilityProbabilityCertificate<ValueType>::clone() const {
-    auto cloned = std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, targetStates, targetLabel);
+    auto cloned = hasConstraintStates()
+                      ? std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, targetStates, constraintStates, targetLabel, constraintLabel)
+                      : std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, targetStates, targetLabel);
     if (hasLowerBoundsCertificate()) {
         auto v = lowerBoundsCertificate.values;
         auto r = lowerBoundsCertificate.ranks;
@@ -262,6 +312,11 @@ bool ReachabilityProbabilityCertificate<ValueType>::hasLowerBoundsCertificate() 
 template<typename ValueType>
 bool ReachabilityProbabilityCertificate<ValueType>::hasUpperBoundsCertificate() const {
     return !upperBoundsCertificate.values.empty();
+}
+
+template<typename ValueType>
+bool ReachabilityProbabilityCertificate<ValueType>::hasConstraintStates() const {
+    return constraintStates.empty();
 }
 
 template class ReachabilityProbabilityCertificate<double>;

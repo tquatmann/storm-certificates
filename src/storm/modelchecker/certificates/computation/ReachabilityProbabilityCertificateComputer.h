@@ -21,7 +21,8 @@ namespace modelchecker {
 template<typename ValueType>
 std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabilityProbabilityCertificate(
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-    storm::storage::BitVector targetStates, std::string targetLabel = "goal");
+    storm::storage::BitVector targetStates, std::optional<storm::storage::BitVector> constraintStates = std::nullopt, std::string targetLabel = "goal",
+    std::optional<std::string> constraintLabel = std::nullopt);
 
 }  // namespace modelchecker
 }  // namespace storm

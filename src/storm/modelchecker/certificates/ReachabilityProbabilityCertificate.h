@@ -25,10 +25,14 @@ class ReachabilityProbabilityCertificate : public Certificate<ValueType> {
     static RankingType const InfRank = std::numeric_limits<RankingType>::max();
     ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
                                        std::string targetLabel = "goal");
+    ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
+                                       storm::storage::BitVector constraintStates, std::string targetLabel = "goal",
+                                       std::string constraintLabel = "constraint");
     virtual ~ReachabilityProbabilityCertificate() = default;
     virtual bool checkValidity(storm::models::Model<ValueType> const& model) const override;
     bool checkValidity(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix) const;
     virtual storm::json<ValueType> toJson() const override;
+    virtual void exportToStream(std::ostream& out) const override;
     virtual std::string summaryString(storm::storage::BitVector const& relevantStates) const override;
     virtual std::unique_ptr<Certificate<ValueType>> clone() const override;
 
@@ -39,11 +43,12 @@ class ReachabilityProbabilityCertificate : public Certificate<ValueType> {
     bool hasUpperBoundsCertificate() const;
 
    private:
+    bool hasConstraintStates() const;
     template<storm::OptimizationDirection Dir>
     bool checkValidityInternal(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix) const;
 
-    storm::storage::BitVector const targetStates;
-    std::string const targetLabel;
+    storm::storage::BitVector const targetStates, constraintStates;
+    std::string const targetLabel, constraintLabel;
     std::optional<storm::OptimizationDirection> const dir;
 
     struct {

@@ -98,7 +98,8 @@ class LowerUpperValueCertificateComputer {
 template<typename ValueType, storm::OptimizationDirection Dir>
 std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType> computeLowerBoundRanking(
     storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
-    storm::storage::BitVector const& targetStates, storm::OptionalRef<storm::storage::BitVector const> choiceConstraint = storm::NullRef) {
+    storm::storage::BitVector const& targetStates, storm::OptionalRef<storm::storage::BitVector const> constraintStates,
+    storm::OptionalRef<storm::storage::BitVector const> choiceConstraint = storm::NullRef) {
     using RankingType = typename ReachabilityProbabilityCertificate<ValueType>::RankingType;
     RankingType const InfRank = ReachabilityProbabilityCertificate<ValueType>::InfRank;
     auto const& rowGroupIndices = transitionProbabilityMatrix.getRowGroupIndices();
@@ -112,6 +113,9 @@ std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType>
         for (auto const& preEntry : backwardTransitions.getRow(state)) {
             auto const preState = preEntry.getColumn();
             if (ranks[preState] != InfRank) {
+                continue;
+            }
+            if (constraintStates.has_value() && !constraintStates->get(preState)) {
                 continue;
             }
             storm::utility::Extremum<storm::solver::invert(Dir), RankingType> newRankMinusOne;
@@ -153,29 +157,33 @@ struct CertificateData {
 template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir = storm::OptimizationDirection::Minimize>
 CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env,
                                                                          storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                                         storm::storage::BitVector const& targetStates) {
+                                                                         storm::storage::BitVector const& targetStates,
+                                                                         storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
     std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
     utility::BackwardTransitionCache<ValueType> backwardTransitionCache(transitionProbabilityMatrix);
-    auto toRewardData =
-        ReachabilityProbabilityToRewardTransformer<ValueType>(transitionProbabilityMatrix, backwardTransitionCache).transform(optionalDir, targetStates);
+    auto toRewardData = ReachabilityProbabilityToRewardTransformer<ValueType>(transitionProbabilityMatrix, backwardTransitionCache)
+                            .transform(optionalDir, targetStates, constraintStates);
+    STORM_LOG_ASSERT(toRewardData.terminalStateValues.size() == 1 && toRewardData.terminalStateValues.front().first.isOne(),
+                     "Expected exactly one terminal state value with value 1.");
     LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData.terminalStates,
-                                                                                  toRewardData.prob1States);
+                                                                                  toRewardData.terminalStateValues.front().second);
 
     auto [lowerValues, upperValues] = computer.compute(LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir>::Algorithm::IntervalIteration,
                                                        env.solver().minMax().getRelativeTerminationCriterion(),
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
-    auto ranks = computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(),
-                                                          targetStates);  // TODO: choice constraints for max reach
+    auto ranks = computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates,
+                                                          constraintStates);  // TODO: choice constraints for max reach
     return {std::move(lowerValues), std::move(upperValues), std::move(ranks)};
 }
 
 template<typename ValueType>
 CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
                                                                          storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                                         storm::storage::BitVector const& targetStates) {
+                                                                         storm::storage::BitVector const& targetStates,
+                                                                         storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
     STORM_PRINT_AND_LOG("Transforming to floating point arithmetic.");
     auto matrixDouble = transitionProbabilityMatrix.template toValueType<double>();
-    auto dataDouble = computeReachabilityProbabilityCertificateData(env, dir, matrixDouble, targetStates);
+    auto dataDouble = computeReachabilityProbabilityCertificateData(env, dir, matrixDouble, targetStates, constraintStates);
     return CertificateData<ValueType>{storm::utility::vector::convertNumericVector<ValueType>(dataDouble.lowerValues),
                                       storm::utility::vector::convertNumericVector<ValueType>(dataDouble.upperValues), std::move(dataDouble.ranks)};
 }
@@ -183,19 +191,20 @@ CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::
 template<>
 CertificateData<double> computeReachabilityProbabilityCertificateData(storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
                                                                       storm::storage::SparseMatrix<double> const& transitionProbabilityMatrix,
-                                                                      storm::storage::BitVector const& targetStates) {
+                                                                      storm::storage::BitVector const& targetStates,
+                                                                      storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
     using ValueType = double;
     CertificateData<ValueType> data;
     if (dir.has_value()) {
         if (storm::solver::maximize(*dir)) {
             data = computeReachabilityProbabilityCertificateData<ValueType, true, storm::OptimizationDirection::Maximize>(env, transitionProbabilityMatrix,
-                                                                                                                          targetStates);
+                                                                                                                          targetStates, constraintStates);
         } else {
             data = computeReachabilityProbabilityCertificateData<ValueType, true, storm::OptimizationDirection::Minimize>(env, transitionProbabilityMatrix,
-                                                                                                                          targetStates);
+                                                                                                                          targetStates, constraintStates);
         }
     } else {
-        data = computeReachabilityProbabilityCertificateData<ValueType, false>(env, transitionProbabilityMatrix, targetStates);
+        data = computeReachabilityProbabilityCertificateData<ValueType, false>(env, transitionProbabilityMatrix, targetStates, constraintStates);
     }
     return data;
 }
@@ -203,9 +212,18 @@ CertificateData<double> computeReachabilityProbabilityCertificateData(storm::Env
 template<typename ValueType>
 std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabilityProbabilityCertificate(
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-    storm::storage::BitVector targetStates, std::string targetLabel) {
-    auto data = computeReachabilityProbabilityCertificateData<ValueType>(env, dir, transitionProbabilityMatrix, targetStates);
-    auto result = std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, std::move(targetStates), std::move(targetLabel));
+    storm::storage::BitVector targetStates, std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel,
+    std::optional<std::string> constraintLabel) {
+    CertificateData<ValueType> data;
+    std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> result;
+    if (constraintStates.has_value()) {
+        data = computeReachabilityProbabilityCertificateData<ValueType>(env, dir, transitionProbabilityMatrix, targetStates, constraintStates.value());
+        result = std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, std::move(targetStates), std::move(constraintStates.value()),
+                                                                                 std::move(targetLabel), constraintLabel.value_or("constraint"));
+    } else {
+        data = computeReachabilityProbabilityCertificateData<ValueType>(env, dir, transitionProbabilityMatrix, targetStates, storm::NullRef);
+        result = std::make_unique<ReachabilityProbabilityCertificate<ValueType>>(dir, std::move(targetStates), std::move(targetLabel));
+    }
     result->setLowerBoundsCertificate(std::move(data.lowerValues), std::move(data.ranks));
     result->setUpperBoundsCertificate(std::move(data.upperValues));
     return result;
@@ -213,9 +231,11 @@ std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabili
 
 template std::unique_ptr<ReachabilityProbabilityCertificate<double>> computeReachabilityProbabilityCertificate<double>(
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<double> const& transitionProbabilityMatrix,
-    storm::storage::BitVector targetStates, std::string targetLabel);
+    storm::storage::BitVector targetStates, std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel,
+    std::optional<std::string> constraintLabel);
 template std::unique_ptr<ReachabilityProbabilityCertificate<storm::RationalNumber>> computeReachabilityProbabilityCertificate<storm::RationalNumber>(
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
-    storm::storage::SparseMatrix<storm::RationalNumber> const& transitionProbabilityMatrix, storm::storage::BitVector targetStates, std::string targetLabel);
+    storm::storage::SparseMatrix<storm::RationalNumber> const& transitionProbabilityMatrix, storm::storage::BitVector targetStates,
+    std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel, std::optional<std::string> constraintLabel);
 
 }  // namespace storm::modelchecker

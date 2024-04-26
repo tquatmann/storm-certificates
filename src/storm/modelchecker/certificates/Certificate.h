@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <ostream>
 #include <string>
 #include "storm/adapters/JsonForward.h"
 #include "storm/modelchecker/certificates/CertificateKind.h"
@@ -24,6 +25,7 @@ class Certificate {
     virtual ~Certificate() = default;
     virtual bool checkValidity(storm::models::Model<ValueType> const& model) const = 0;
     virtual storm::json<ValueType> toJson() const = 0;
+    virtual void exportToStream(std::ostream& out) const = 0;
     virtual std::string summaryString(storm::storage::BitVector const& relevantStates) const = 0;
     virtual std::unique_ptr<Certificate<ValueType>> clone() const = 0;
 

@@ -188,11 +188,15 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
             STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
         } else {
             STORM_LOG_WARN_COND(!checkTask.isProduceSchedulersSet(), "Scheduler generation with certificates not implemented.");
-            STORM_LOG_THROW(leftResult.getTruthValuesVector().full(), storm::exceptions::NotImplementedException,
-                            "Reachability probability certificates not implemented for constrained reachability (aka Until formulas)");
+            std::optional<storm::storage::BitVector> constraintStates;
+            std::optional<std::string> constraintLabel;
+            if (!pathFormula.getLeftSubformula().isTrueFormula()) {
+                constraintStates = leftResult.getTruthValuesVector();
+                constraintLabel = pathFormula.getLeftSubformula().toString();
+            }
             auto certificate = storm::modelchecker::computeReachabilityProbabilityCertificate(
-                env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), rightResult.getTruthValuesVector(),
-                pathFormula.getRightSubformula().toString());
+                env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), rightResult.getTruthValuesVector(), constraintStates,
+                pathFormula.getRightSubformula().toString(), constraintLabel);
             storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
             return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
         }
