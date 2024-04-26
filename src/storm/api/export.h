@@ -5,7 +5,9 @@
 #include "storm/io/DDEncodingExporter.h"
 #include "storm/io/DirectEncodingExporter.h"
 #include "storm/io/file.h"
+#include "storm/modelchecker/certificates/Certificate.h"
 #include "storm/modelchecker/results/CheckResult.h"
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
 #include "storm/storage/Scheduler.h"
@@ -88,10 +90,13 @@ inline void exportCheckResultToJson(std::shared_ptr<storm::models::sparse::Model
     if (checkResult->isExplicitQualitativeCheckResult()) {
         auto j = checkResult->asExplicitQualitativeCheckResult().toJson(model->getOptionalStateValuations(), model->getStateLabeling());
         stream << storm::dumpJson(j);
-    } else {
-        STORM_LOG_THROW(checkResult->isExplicitQuantitativeCheckResult(), storm::exceptions::NotSupportedException,
-                        "Export of check results is only supported for explicit check results (e.g. in the sparse engine)");
+    } else if (checkResult->isExplicitQuantitativeCheckResult()) {
         auto j = checkResult->template asExplicitQuantitativeCheckResult<ValueType>().toJson(model->getOptionalStateValuations(), model->getStateLabeling());
+        stream << storm::dumpJson(j);
+    } else {
+        STORM_LOG_THROW(checkResult->isExplicitCertificateCheckResult(), storm::exceptions::NotSupportedException,
+                        "Export of check results is only supported for explicit check results and certificates (e.g. in the sparse engine)");
+        auto j = checkResult->template asExplicitCertificateCheckResult<ValueType>().getCertificate().toJson();
         stream << storm::dumpJson(j);
     }
     storm::utility::closeFile(stream);
@@ -101,6 +106,26 @@ template<>
 inline void exportCheckResultToJson<storm::RationalFunction>(std::shared_ptr<storm::models::sparse::Model<storm::RationalFunction>> const&,
                                                              std::unique_ptr<storm::modelchecker::CheckResult> const&, std::string const&) {
     STORM_LOG_THROW(false, storm::exceptions::NotSupportedException, "Export of check results is not supported for rational functions. ");
+}
+
+template<typename ValueType>
+inline void exportCheckResult(std::shared_ptr<storm::models::sparse::Model<ValueType>> const& model,
+                              std::unique_ptr<storm::modelchecker::CheckResult> const& checkResult, std::string const& filename) {
+    std::string jsonFileExtension = ".json";
+    bool const endsWithJson = filename.size() > 4 && std::equal(jsonFileExtension.rbegin(), jsonFileExtension.rend(), filename.rbegin());
+    bool const isCertificate = checkResult->isExplicitCertificateCheckResult();
+    if (isCertificate && !endsWithJson) {
+        if constexpr (std::is_same_v<ValueType, storm::RationalFunction>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotSupportedException, "Export of check results is not supported for rational functions.");
+        } else {
+            std::ofstream stream;
+            storm::utility::openFile(filename, stream);
+            checkResult->asExplicitCertificateCheckResult<ValueType>().getCertificate().exportToStream(stream);
+            storm::utility::closeFile(stream);
+        }
+    } else {
+        exportCheckResultToJson(model, checkResult, filename);
+    }
 }
 
 }  // namespace api

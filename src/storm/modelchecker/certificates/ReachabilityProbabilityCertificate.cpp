@@ -224,7 +224,48 @@ storm::json<ValueType> ReachabilityProbabilityCertificate<ValueType>::toJson() c
 
 template<typename ValueType>
 void ReachabilityProbabilityCertificate<ValueType>::exportToStream(std::ostream& out) const {
-    assert(false);
+    std::string const dirString = storm::solver::minimize(dir.value_or(storm::OptimizationDirection::Minimize)) ? "min" : "max";
+    // Header
+    out << "# Certificate for 'P" << dirString << "=? [";
+    if (hasConstraintStates()) {
+        out << "(" << constraintLabel << ") U (" << targetLabel << ")]'\n";
+        out << "until ";
+    } else {
+        out << "F (" << targetLabel << ")]'\n";
+        out << "reach ";
+    }
+    out << dirString;
+    if (hasLowerBoundsCertificate()) {
+        out << " lb";
+    }
+    if (hasUpperBoundsCertificate()) {
+        out << " ub";
+    }
+    out << "\n" << targetStates.size() << "\n";
+
+    // Target & constraint states
+    for (auto i : targetStates) {
+        out << " " << i;
+    }
+    out << "\n";
+    if (hasConstraintStates()) {
+        for (auto i : constraintStates) {
+            out << " " << i;
+        }
+        out << "\n";
+    }
+
+    // State values
+    for (uint64_t i = 0; i < targetStates.size(); ++i) {
+        out << i << " ";
+        if (hasLowerBoundsCertificate()) {
+            out << lowerBoundsCertificate.values[i] << " " << lowerBoundsCertificate.ranks[i] << " ";
+        }
+        if (hasUpperBoundsCertificate()) {
+            out << upperBoundsCertificate.values[i] << " ";
+        }
+        out << "\n";
+    }
 }
 
 template<typename ValueType>
@@ -316,7 +357,7 @@ bool ReachabilityProbabilityCertificate<ValueType>::hasUpperBoundsCertificate() 
 
 template<typename ValueType>
 bool ReachabilityProbabilityCertificate<ValueType>::hasConstraintStates() const {
-    return constraintStates.empty();
+    return !constraintStates.empty();
 }
 
 template class ReachabilityProbabilityCertificate<double>;

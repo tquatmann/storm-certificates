@@ -1277,8 +1277,8 @@ void verifyWithSparseEngine(std::shared_ptr<storm::models::ModelBase> const& mod
                                 "No information of state valuations available. The result output will use internal state ids. You might be interested in "
                                 "building the model with state valuations using --buildstateval.");
             STORM_LOG_WARN_COND(exportCount == 0, "Prepending " << exportCount << " to file name for this property because there are multiple properties.");
-            storm::api::exportCheckResultToJson(sparseModel, result,
-                                                (exportCount == 0 ? std::string("") : std::to_string(exportCount)) + ioSettings.getExportCheckResultFilename());
+            storm::api::exportCheckResult(sparseModel, result,
+                                          (exportCount == 0 ? std::string("") : std::to_string(exportCount)) + ioSettings.getExportCheckResultFilename());
         }
         ++exportCount;
     };
