@@ -20,9 +20,12 @@ template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection
 class LowerUpperValueCertificateComputer {
    public:
     enum class Algorithm { IntervalIteration };
+
+    template<typename VT>
     struct SubsystemData {
-        storm::storage::SparseMatrix<ValueType> transitions;
-        std::shared_ptr<storm::solver::helper::ValueIterationOperator<ValueType, !Nondeterministic>> viOp;
+        storm::storage::SparseMatrix<VT> transitions;
+        std::pair<std::vector<VT>, std::vector<VT>> offsets;
+        std::pair<std::vector<VT>, std::vector<VT>> operands;
     };
 
     LowerUpperValueCertificateComputer(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
@@ -48,23 +51,17 @@ class LowerUpperValueCertificateComputer {
         storm::utility::vector::setVectorValues(globalUpperValues, prob0States, storm::utility::zero<ValueType>());
     }
 
-    SubsystemData initializeSubsystemData(storm::storage::BitVector const& subsystem) const {
-        auto result = SubsystemData{transitionProbabilityMatrix.getSubmatrix(true, subsystem, subsystem),
-                                    std::make_shared<storm::solver::helper::ValueIterationOperator<ValueType, !Nondeterministic>>()};
-        result.viOp->setMatrixBackwards(result.transitions);
-        return result;
-    }
-
-    std::vector<ValueType> getSubsystemExitValues(storm::storage::BitVector const& subsystem, uint64_t numSubystemRows,
-                                                  std::vector<ValueType> const& globalValues) {
-        std::vector<ValueType> result;
+    template<typename VT>
+    std::vector<VT> getSubsystemExitValues(storm::storage::BitVector const& subsystem, uint64_t numSubystemRows,
+                                           std::vector<ValueType> const& globalValues) const {
+        std::vector<VT> result;
         result.reserve(numSubystemRows);
         for (auto const state : subsystem) {
             for (auto const rowIndex : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-                auto rowValue = storm::utility::zero<ValueType>();
+                auto rowValue = storm::utility::zero<VT>();
                 for (auto const& entry : transitionProbabilityMatrix.getRow(rowIndex)) {
                     if (!subsystem.get(entry.getColumn())) {
-                        rowValue += entry.getValue() * globalValues[entry.getColumn()];
+                        rowValue += storm::utility::convertNumber<VT, ValueType>(entry.getValue() * globalValues[entry.getColumn()]);
                     }
                 }
                 result.push_back(std::move(rowValue));
@@ -75,17 +72,64 @@ class LowerUpperValueCertificateComputer {
         return result;
     }
 
+    template<typename VT>
+    storm::storage::SparseMatrix<VT> getSubsystemMatrix(storm::storage::BitVector const& subsystem) const {
+        auto subMatrix = transitionProbabilityMatrix.getSubmatrix(true, subsystem, subsystem);
+        if constexpr (std::is_same_v<VT, ValueType>) {
+            return subMatrix;
+        } else {
+            return subMatrix.template toValueType<VT>();
+        }
+    }
+
+    template<typename VT>
+    std::vector<VT> getSubsystemOperands(storm::storage::BitVector const& subsystem, uint64_t numSubystemRows,
+                                         std::vector<ValueType> const& globalValues) const {
+        std::vector<VT> result;
+        result.reserve(numSubystemRows);
+        for (uint64_t i : subsystem) {
+            result.push_back(storm::utility::convertNumber<VT>(globalValues[i]));
+        }
+        return result;
+    }
+
+    template<typename VT>
+    SubsystemData<VT> initializeSubsystemData(storm::storage::BitVector const& subsystem) const {
+        auto result = SubsystemData<VT>{getSubsystemMatrix<VT>(subsystem), {}, {}};
+        result.offsets = {getSubsystemExitValues<VT>(subsystem, result.transitions.getRowCount(), globalLowerValues),
+                          getSubsystemExitValues<VT>(subsystem, result.transitions.getRowCount(), globalUpperValues)};
+        result.operands = {getSubsystemOperands<VT>(subsystem, result.transitions.getRowGroupCount(), globalLowerValues),
+                           getSubsystemOperands<VT>(subsystem, result.transitions.getRowGroupCount(), globalUpperValues)};
+        return result;
+    }
+
+    template<typename VT>
+    void setGlobalValuesFromSubsystem(storm::storage::BitVector const& subsystem, std::vector<VT>& localValues, std::vector<ValueType>& globalValues) {
+        STORM_LOG_ASSERT(subsystem.getNumberOfSetBits() == localValues.size(), "Unexpected number of values in subsystem.");
+        STORM_LOG_ASSERT(subsystem.size() == globalValues.size(), "Unexpected number of values.");
+        auto localValuesIt = localValues.cbegin();
+        for (auto i : subsystem) {
+            globalValues[i] = storm::utility::convertNumber<ValueType>(*localValuesIt);
+            ++localValuesIt;
+        }
+    }
+
     void computeForSubsystem(Algorithm alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
+        // using VT = ValueType;
+        using VT = std::conditional_t<std::is_same_v<ValueType, storm::RationalNumber>, double, ValueType>;
+        std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
+
+        auto subsystemData = initializeSubsystemData<VT>(subsystemStates);
+
         STORM_LOG_ASSERT(alg == Algorithm::IntervalIteration, "Unsupported algorithm.");
-        auto subsystemData = initializeSubsystemData(subsystemStates);
-        storm::solver::helper::IntervalIterationHelper<ValueType, !Nondeterministic> iiHelper(subsystemData.viOp);
-        auto subsystemOffsets = getSubsystemExitValues(subsystemStates, subsystemData.transitions.getRowCount(), globalLowerValues);
-        auto xy = std::make_pair(storm::utility::vector::filterVector(globalLowerValues, subsystemStates),
-                                 storm::utility::vector::filterVector(globalUpperValues, subsystemStates));
+        auto viOp = std::make_shared<storm::solver::helper::ValueIterationOperator<VT, !Nondeterministic>>();
+        viOp->setMatrixBackwards(subsystemData.transitions);
+        storm::solver::helper::IntervalIterationHelper<VT, !Nondeterministic> iiHelper(viOp);
         uint64_t numIterations = 0;
-        iiHelper.template II<Dir>(xy, subsystemOffsets, numIterations, relative, precision);  // TODO: relevant values?
-        storm::utility::vector::setVectorValues(globalLowerValues, subsystemStates, xy.first);
-        storm::utility::vector::setVectorValues(globalUpperValues, subsystemStates, xy.second);
+        iiHelper.II(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
+                    optionalDir);  // TODO: relevant values?
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData.operands.first, globalLowerValues);
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData.operands.second, globalUpperValues);
     }
 
     storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix;
@@ -181,19 +225,6 @@ CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::
                                                                          storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
                                                                          storm::storage::BitVector const& targetStates,
                                                                          storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
-    STORM_PRINT_AND_LOG("Transforming to floating point arithmetic.");
-    auto matrixDouble = transitionProbabilityMatrix.template toValueType<double>();
-    auto dataDouble = computeReachabilityProbabilityCertificateData(env, dir, matrixDouble, targetStates, constraintStates);
-    return CertificateData<ValueType>{storm::utility::vector::convertNumericVector<ValueType>(dataDouble.lowerValues),
-                                      storm::utility::vector::convertNumericVector<ValueType>(dataDouble.upperValues), std::move(dataDouble.ranks)};
-}
-
-template<>
-CertificateData<double> computeReachabilityProbabilityCertificateData(storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
-                                                                      storm::storage::SparseMatrix<double> const& transitionProbabilityMatrix,
-                                                                      storm::storage::BitVector const& targetStates,
-                                                                      storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
-    using ValueType = double;
     CertificateData<ValueType> data;
     if (dir.has_value()) {
         if (storm::solver::maximize(*dir)) {

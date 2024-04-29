@@ -26,9 +26,14 @@ class IntervalIterationHelper {
    public:
     IntervalIterationHelper(std::shared_ptr<ValueIterationOperator<ValueType, TrivialRowGrouping>> viOperator);
 
-    template<OptimizationDirection Dir>
-    SolverStatus II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy, std::vector<ValueType> const& offsets, uint64_t& numIterations,
-                    bool relative, ValueType const& precision, std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback = {},
+    template<OptimizationDirection Dir, typename OffsetType>
+    SolverStatus II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy, OffsetType const& offsets, uint64_t& numIterations, bool relative,
+                    ValueType const& precision, std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback = {},
+                    std::optional<storm::storage::BitVector> const& relevantValues = {}) const;
+
+    SolverStatus II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy, std::pair<std::vector<ValueType>, std::vector<ValueType>> const& offsets,
+                    uint64_t& numIterations, bool relative, ValueType const& precision, std::optional<storm::OptimizationDirection> const& dir = {},
+                    std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback = {},
                     std::optional<storm::storage::BitVector> const& relevantValues = {}) const;
 
     SolverStatus II(std::vector<ValueType>& operand, std::vector<ValueType> const& offsets, uint64_t& numIterations, bool relative, ValueType const& precision,

@@ -85,9 +85,9 @@ bool checkConvergence(std::pair<std::vector<ValueType>, std::vector<ValueType>> 
 }
 
 template<typename ValueType, bool TrivialRowGrouping>
-template<OptimizationDirection Dir>
+template<OptimizationDirection Dir, typename OffsetType>
 SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
-                                                                        std::vector<ValueType> const& offsets, uint64_t& numIterations, bool relative,
+                                                                        OffsetType const& offsets, uint64_t& numIterations, bool relative,
                                                                         ValueType const& precision,
                                                                         std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback,
                                                                         std::optional<storm::storage::BitVector> const& relevantValues) const {
@@ -113,6 +113,20 @@ SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pai
         }
     }
     return status;
+}
+
+template<typename ValueType, bool TrivialRowGrouping>
+SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
+                                                                        std::pair<std::vector<ValueType>, std::vector<ValueType>> const& offsets,
+                                                                        uint64_t& numIterations, bool relative, ValueType const& precision,
+                                                                        std::optional<storm::OptimizationDirection> const& dir,
+                                                                        std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback,
+                                                                        std::optional<storm::storage::BitVector> const& relevantValues) const {
+    if (!dir.has_value() || maximize(*dir)) {
+        return II<OptimizationDirection::Maximize>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues);
+    } else {
+        return II<OptimizationDirection::Minimize>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues);
+    }
 }
 
 template<typename ValueType, bool TrivialRowGrouping>
