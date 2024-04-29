@@ -34,8 +34,8 @@ ReachabilityProbabilityCertificate<ValueType>::ReachabilityProbabilityCertificat
       targetLabel(targetLabel),
       constraintLabel(std::move(constraintLabel)),
       dir(dir) {
-    STORM_LOG_ASSERT(!constraintStates.empty(), "Constraint set given but empty.");
-    STORM_LOG_ASSERT(constraintStates.size() == targetStates.size(), "Constraint set and target set consider a different state count.");
+    STORM_LOG_ASSERT(!this->constraintStates.empty(), "Constraint set given but empty.");
+    STORM_LOG_ASSERT(this->constraintStates.size() == this->targetStates.size(), "Constraint set and target set consider a different state count.");
 }
 
 template<typename ValueType>
