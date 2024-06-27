@@ -16,6 +16,10 @@ class CertificationSettings : public ModuleSettings {
      */
     bool isProduceCertificateSet() const;
 
+    bool isUseTopologicalSet() const;
+
+    std::string getMethod() const;
+
     bool check() const override;
 
     // The name of the module.
