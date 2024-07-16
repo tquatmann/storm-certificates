@@ -356,7 +356,9 @@ class LowerUpperValueCertificateComputer {
                             "Unmet requirements for MinMax linear equation solver: " << req.getEnabledRequirementsAsString() << ".");
             auto solver = solverFactory.create(env, std::move(subsystemData.transitions));
             solver->setHasUniqueSolution(true);  // TODO: Has no end components?
-            solver->setInitialScheduler(std::move(initSched));
+            if (!initSched.empty()) {
+                solver->setInitialScheduler(std::move(initSched));
+            }
             solver->setRequirementsChecked(true);
             // TODO: relevant values?
             solver->solveEquations(env, Dir, subsystemData.operands, subsystemData.offsets);
