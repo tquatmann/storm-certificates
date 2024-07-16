@@ -319,7 +319,7 @@ class LowerUpperValueCertificateComputer {
     void computeForSubsystemExPI(storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, ValueType, storm::RationalNumber>;  // VT is exact
 
-        auto subsystemData = initializeSubsystemData<VT, true>(subsystemStates);
+        auto subsystemData = initializeSubsystemDataEliminateECs<VT, true>(subsystemStates);
 
         storm::Environment env;
         env.solver().minMax().setMethod(storm::solver::MinMaxMethod::ViToPi);
