@@ -235,12 +235,6 @@ void ReachabilityProbabilityCertificate<ValueType>::exportToStream(std::ostream&
         out << "reach ";
     }
     out << dirString;
-    if (hasLowerBoundsCertificate()) {
-        out << " lb";
-    }
-    if (hasUpperBoundsCertificate()) {
-        out << " ub";
-    }
     out << "\n" << targetStates.size() << "\n";
 
     // Target & constraint states
@@ -259,7 +253,12 @@ void ReachabilityProbabilityCertificate<ValueType>::exportToStream(std::ostream&
     for (uint64_t i = 0; i < targetStates.size(); ++i) {
         out << i << " ";
         if (hasLowerBoundsCertificate()) {
-            out << lowerBoundsCertificate.values[i] << " " << lowerBoundsCertificate.ranks[i] << " ";
+            out << lowerBoundsCertificate.values[i] << " ";
+            if (auto ri = lowerBoundsCertificate.ranks[i]; ri == InfRank) {
+                out << "inf ";
+            } else {
+                out << ri << " ";
+            }
         }
         if (hasUpperBoundsCertificate()) {
             out << upperBoundsCertificate.values[i] << " ";
