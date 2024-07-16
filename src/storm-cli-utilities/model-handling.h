@@ -927,6 +927,10 @@ void printFilteredResult(std::unique_ptr<storm::modelchecker::CheckResult> const
                 STORM_PRINT(resultValue);
             }
         }
+    } else if (result->isExplicitCertificateCheckResult()) {
+        STORM_PRINT(*result);
+        STORM_LOG_WARN_COND(ft == storm::modelchecker::FilterType::VALUES,
+                            "\nIgnored non-default property filter " << storm::modelchecker::toString(ft) << " for certificate result.");
     } else {
         switch (ft) {
             case storm::modelchecker::FilterType::VALUES:
