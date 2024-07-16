@@ -1,39 +1,30 @@
 #include "storm/modelchecker/prctl/SparseMdpPrctlModelChecker.h"
 
-#include "storm/utility/FilteredRewardModel.h"
-#include "storm/utility/constants.h"
-#include "storm/utility/graph.h"
-#include "storm/utility/macros.h"
-#include "storm/utility/vector.h"
-
-#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
-#include "storm/modelchecker/results/ExplicitParetoCurveCheckResult.h"
-#include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
-#include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
-#include "storm/modelchecker/results/LexicographicCheckResult.h"
-
+#include "storm/exceptions/InvalidPropertyException.h"
+#include "storm/exceptions/InvalidStateException.h"
 #include "storm/logic/FragmentSpecification.h"
-
-#include "storm/models/sparse/StandardRewardModel.h"
-
 #include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
 #include "storm/modelchecker/helper/finitehorizon/SparseNondeterministicStepBoundedHorizonHelper.h"
 #include "storm/modelchecker/helper/infinitehorizon/SparseNondeterministicInfiniteHorizonHelper.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
 #include "storm/modelchecker/helper/utility/SetInformationFromCheckTask.h"
 #include "storm/modelchecker/lexicographic/lexicographicModelChecking.h"
-#include "storm/modelchecker/prctl/helper/SparseMdpPrctlHelper.h"
-
 #include "storm/modelchecker/multiobjective/multiObjectiveModelChecking.h"
+#include "storm/modelchecker/prctl/helper/SparseMdpPrctlHelper.h"
 #include "storm/modelchecker/prctl/helper/rewardbounded/QuantileHelper.h"
-
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
+#include "storm/modelchecker/results/ExplicitParetoCurveCheckResult.h"
+#include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
+#include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
+#include "storm/modelchecker/results/LexicographicCheckResult.h"
+#include "storm/models/sparse/StandardRewardModel.h"
 #include "storm/solver/SolveGoal.h"
-
-#include "storm/exceptions/InvalidPropertyException.h"
-#include "storm/exceptions/InvalidStateException.h"
 #include "storm/storage/expressions/Expressions.h"
-
-#include "storm/exceptions/InvalidPropertyException.h"
+#include "storm/utility/FilteredRewardModel.h"
+#include "storm/utility/constants.h"
+#include "storm/utility/graph.h"
+#include "storm/utility/macros.h"
+#include "storm/utility/vector.h"
 
 namespace storm {
 namespace modelchecker {
@@ -312,7 +303,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeCumulativeRewards(
-    Environment const& env, storm::logic::RewardMeasureType, CheckTask<storm::logic::CumulativeRewardFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::CumulativeRewardFormula, SolutionType> const& checkTask) {
     storm::logic::CumulativeRewardFormula const& rewardPathFormula = checkTask.getFormula();
     STORM_LOG_THROW(checkTask.isOptimizationDirectionSet(), storm::exceptions::InvalidPropertyException,
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
@@ -347,7 +338,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeInstantaneousRewards(
-    Environment const& env, storm::logic::RewardMeasureType, CheckTask<storm::logic::InstantaneousRewardFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::InstantaneousRewardFormula, SolutionType> const& checkTask) {
     storm::logic::InstantaneousRewardFormula const& rewardPathFormula = checkTask.getFormula();
     STORM_LOG_THROW(checkTask.isOptimizationDirectionSet(), storm::exceptions::InvalidPropertyException,
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
@@ -361,7 +352,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeReachabilityRewards(
-    Environment const& env, storm::logic::RewardMeasureType, CheckTask<storm::logic::EventuallyFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::EventuallyFormula, SolutionType> const& checkTask) {
     storm::logic::EventuallyFormula const& eventuallyFormula = checkTask.getFormula();
     STORM_LOG_THROW(checkTask.isOptimizationDirectionSet(), storm::exceptions::InvalidPropertyException,
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
@@ -381,7 +372,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeReachabilityTimes(
-    Environment const& env, storm::logic::RewardMeasureType, CheckTask<storm::logic::EventuallyFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::EventuallyFormula, SolutionType> const& checkTask) {
     storm::logic::EventuallyFormula const& eventuallyFormula = checkTask.getFormula();
     STORM_LOG_THROW(checkTask.isOptimizationDirectionSet(), storm::exceptions::InvalidPropertyException,
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
@@ -400,7 +391,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeTotalRewards(
-    Environment const& env, storm::logic::RewardMeasureType, CheckTask<storm::logic::TotalRewardFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::TotalRewardFormula, SolutionType> const& checkTask) {
     STORM_LOG_THROW(checkTask.isOptimizationDirectionSet(), storm::exceptions::InvalidPropertyException,
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
     auto rewardModel = storm::utility::createFilteredRewardModel(this->getModel(), checkTask);
@@ -441,8 +432,7 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
 
 template<typename SparseMdpModelType>
 std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::computeLongRunAverageRewards(
-    Environment const& env, storm::logic::RewardMeasureType rewardMeasureType,
-    CheckTask<storm::logic::LongRunAverageRewardFormula, SolutionType> const& checkTask) {
+    Environment const& env, CheckTask<storm::logic::LongRunAverageRewardFormula, SolutionType> const& checkTask) {
     if constexpr (std::is_same_v<ValueType, storm::Interval>) {
         STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented lra with intervals");
     } else {
