@@ -1237,7 +1237,7 @@ void verifyWithSparseEngine(std::shared_ptr<storm::models::ModelBase> const& mod
     auto postprocessingCallback = [&sparseModel, &ioSettings, &input, &exportCount](std::unique_ptr<storm::modelchecker::CheckResult> const& result) {
         if (result->isExplicitCertificateCheckResult()) {
             if constexpr (!std::is_same_v<ValueType, storm::RationalFunction>) {
-                STORM_PRINT_AND_LOG("Certificate validity check ... ")
+                STORM_PRINT_AND_LOG("Certificate validity check ... ");
                 storm::utility::Stopwatch chkValid(true);
                 bool const valid = result->template asExplicitCertificateCheckResult<ValueType>().checkValidity(*sparseModel);
                 chkValid.stop();
