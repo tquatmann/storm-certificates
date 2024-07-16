@@ -16,6 +16,7 @@
 #include "storm/storage/BitVector.h"
 #include "storm/storage/SparseMatrix.h"
 #include "storm/storage/StronglyConnectedComponentDecomposition.h"
+#include "storm/transformer/EndComponentEliminator.h"
 #include "storm/utility/Extremum.h"
 #include "storm/utility/NumberTraits.h"
 #include "storm/utility/OptionalRef.h"
@@ -27,19 +28,16 @@
 
 namespace storm::modelchecker {
 
+template<typename ValueType>
+struct LowerUpperValueCertificateComputerReturnType {
+    std::vector<ValueType> lowerValues;  /// Lower values for each state
+    std::vector<ValueType> upperValues;  // Upper values for each state
+};
+
 template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir>
 class LowerUpperValueCertificateComputer {
    public:
     enum class Algorithm { FpII, ExPI };
-
-    template<typename VT, bool SingleValue>
-    struct SubsystemData {
-        storm::storage::SparseMatrix<VT> transitions;
-        storm::storage::BitVector exitChoices;
-        using ValueVectorType = std::conditional_t<SingleValue, std::vector<VT>, std::pair<std::vector<VT>, std::vector<VT>>>;
-        ValueVectorType offsets;
-        ValueVectorType operands;
-    };
 
     LowerUpperValueCertificateComputer(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
                                        storm::storage::BitVector const& terminalStates, storm::storage::BitVector const& prob1States)
@@ -57,12 +55,10 @@ class LowerUpperValueCertificateComputer {
         }
     }
 
-    std::pair<std::vector<ValueType>, std::vector<ValueType>> compute(bool relative, ValueType const& precision) {
+    LowerUpperValueCertificateComputerReturnType<ValueType> compute(bool relative, ValueType const& precision) {
         auto const& certSettings = storm::settings::getModule<storm::settings::modules::CertificationSettings>();
         auto alg = getAlgorithm();
         initializeValueVectors(alg);
-        // TODO: Mec decomposition?
-        // TODO: Choices tracking?
         if (certSettings.isUseTopologicalSet()) {
             computeTopological(alg, relative, precision, ~terminalStates);
         } else {
@@ -76,10 +72,24 @@ class LowerUpperValueCertificateComputer {
     }
 
    private:
+    template<typename VT, bool SingleValue>
+    struct SubsystemData {
+        storm::storage::SparseMatrix<VT> transitions;
+        storm::storage::BitVector exitChoices;
+        using ValueVectorType = std::conditional_t<SingleValue, std::vector<VT>, std::pair<std::vector<VT>, std::vector<VT>>>;
+        ValueVectorType offsets;
+        ValueVectorType operands;
+        // if originalToReducedStateMapping is given, this subsystem has been reduced and the ith entry is the index in the reduced system corresponding to
+        // the ith subsystem state
+        std::optional<std::vector<uint64_t>> originalToReducedStateMapping;
+    };
+
     void initializeValueVectors(Algorithm alg) {
+        // Lower values
         globalLowerValues.assign(terminalStates.size(), storm::utility::zero<ValueType>());
         storm::utility::vector::setVectorValues(globalLowerValues, prob1States, storm::utility::one<ValueType>());
 
+        // Upper Values
         if (alg == Algorithm::FpII) {
             globalUpperValues.assign(terminalStates.size(), storm::utility::one<ValueType>());
             auto prob0States = terminalStates ^ prob1States;
@@ -151,7 +161,7 @@ class LowerUpperValueCertificateComputer {
 
     template<typename VT, bool SingleValue>
     SubsystemData<VT, SingleValue> initializeSubsystemData(storm::storage::BitVector const& subsystem) const {
-        auto result = SubsystemData<VT, SingleValue>{getSubsystemMatrix<VT>(subsystem), {}, {}};
+        auto result = SubsystemData<VT, SingleValue>{getSubsystemMatrix<VT>(subsystem), {}, {}, {}, {}};
         result.exitChoices = getSubsystemExitChoices(subsystem, result.transitions.getRowCount());
         if constexpr (SingleValue) {
             STORM_LOG_ASSERT(globalUpperValues.empty(), "Expected upper values not to be initialized.");
@@ -167,14 +177,86 @@ class LowerUpperValueCertificateComputer {
         return result;
     }
 
+    template<typename VT, bool SingleValue>
+    SubsystemData<VT, SingleValue> initializeSubsystemDataEliminateECs(storm::storage::BitVector const& subsystem) const {
+        auto original = initializeSubsystemData<VT, SingleValue>(subsystem);
+        storm::storage::BitVector allStates(original.transitions.getRowGroupCount(), true);
+        auto possibleECRows = ~original.exitChoices;
+        storm::storage::MaximalEndComponentDecomposition<VT> ecs(original.transitions, original.transitions.transpose(true), allStates, possibleECRows);
+        if (ecs.empty()) {
+            // No ECs to eliminate
+            return original;
+        }
+        auto reductionRes = storm::transformer::EndComponentEliminator<VT>::transform(original.transitions, ecs, allStates, allStates, false);
+        SubsystemData<VT, SingleValue> reduced{
+            std::move(reductionRes.matrix), std::move(reductionRes.sinkRows), {}, {}, std::move(reductionRes.oldToNewStateMapping)};
+        if constexpr (SingleValue) {
+            reduced.offsets.reserve(reduced.exitChoices.size());
+            reduced.operands.assign(reduced.transitions.getRowGroupCount(), storm::utility::zero<VT>());
+        } else {
+            reduced.offsets.first.reserve(reduced.exitChoices.size());
+            reduced.offsets.second.reserve(reduced.exitChoices.size());
+            reduced.operands.first.assign(reduced.transitions.getRowGroupCount(), storm::utility::zero<VT>());  // lower bound for probabilities
+            reduced.operands.second.assign(reduced.transitions.getRowGroupCount(), storm::utility::one<VT>());  // upper bound for probabilities
+        }
+        for (uint64_t newRow = 0; newRow < reduced.exitChoices.size(); ++newRow) {
+            auto const oldRow = reductionRes.newToOldRowMapping[newRow];
+            if (original.exitChoices.get(oldRow)) {
+                reduced.exitChoices.set(newRow, true);
+            }
+            if constexpr (SingleValue) {
+                reduced.offsets.push_back(original.offsets[oldRow]);
+            } else {
+                reduced.offsets.first.push_back(original.offsets.first[oldRow]);
+                reduced.offsets.second.push_back(original.offsets.second[oldRow]);
+            }
+        }
+        for (uint64_t oldState = 0; oldState < reduced.originalToReducedStateMapping->size(); ++oldState) {
+            auto const newState = reduced.originalToReducedStateMapping->at(oldState);
+            STORM_LOG_ASSERT(newState < reduced.transitions.getRowGroupCount(), "No representative for some state found in the reduced subsystem.");
+            if constexpr (SingleValue) {
+                reduced.operands[newState] = std::max(reduced.operands[newState], original.operands[oldState]);
+            } else {
+                reduced.operands.first[newState] = std::max(reduced.operands.first[newState], original.operands.first[oldState]);     // maximal lower bound
+                reduced.operands.second[newState] = std::min(reduced.operands.second[newState], original.operands.second[oldState]);  // minimal upper bound
+            }
+        }
+        return reduced;
+    }
+
     template<typename VT>
-    void setGlobalValuesFromSubsystem(storm::storage::BitVector const& subsystem, std::vector<VT>& localValues, std::vector<ValueType>& globalValues) {
-        STORM_LOG_ASSERT(subsystem.getNumberOfSetBits() == localValues.size(), "Unexpected number of values in subsystem.");
-        STORM_LOG_ASSERT(subsystem.size() == globalValues.size(), "Unexpected number of values.");
-        auto localValuesIt = localValues.cbegin();
-        for (auto i : subsystem) {
-            globalValues[i] = storm::utility::convertNumber<ValueType>(*localValuesIt);
-            ++localValuesIt;
+    void setGlobalValuesFromSubsystemVector(storm::storage::BitVector const& subsystemStates, std::vector<VT> const& localValues,
+                                            std::vector<ValueType>& globalValues, std::optional<std::vector<uint64_t>> const& reducedStateMapping) {
+        STORM_LOG_ASSERT(subsystemStates.size() == globalValues.size(), "Unexpected number of values.");
+        if (reducedStateMapping) {
+            STORM_LOG_ASSERT(subsystemStates.getNumberOfSetBits() == reducedStateMapping->size(), "Unexpected number of states in unreduced subsystem.");
+            uint64_t unreducedSubsystemState = 0;
+            for (auto globalState : subsystemStates) {
+                auto const reducedSubsystemState = reducedStateMapping->at(unreducedSubsystemState);
+                STORM_LOG_ASSERT(reducedSubsystemState < localValues.size(), "unexpeced index in reduced subsystem.");
+                globalValues[globalState] = storm::utility::convertNumber<ValueType>(localValues[reducedSubsystemState]);
+                ++unreducedSubsystemState;
+            }
+        } else {
+            STORM_LOG_ASSERT(subsystemStates.getNumberOfSetBits() == localValues.size(), "Unexpected number of values in subsystem.");
+            auto localValuesIt = localValues.cbegin();
+            for (auto i : subsystemStates) {
+                globalValues[i] = storm::utility::convertNumber<ValueType>(*localValuesIt);
+                ++localValuesIt;
+            }
+        }
+    }
+
+    template<typename VT, bool SingleValue>
+    void setGlobalValuesFromSubsystem(storm::storage::BitVector const& subsystemStates, SubsystemData<VT, SingleValue> const& subsystemData) {
+        if constexpr (SingleValue) {
+            setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands, globalLowerValues, subsystemData.originalToReducedStateMapping);
+            STORM_LOG_ASSERT(globalUpperValues.empty(), "Expected upper values not to be initialized.");
+        } else {
+            setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands.first, globalLowerValues,
+                                                   subsystemData.originalToReducedStateMapping);
+            setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands.second, globalUpperValues,
+                                                   subsystemData.originalToReducedStateMapping);
         }
     }
 
@@ -222,8 +304,8 @@ class LowerUpperValueCertificateComputer {
     void computeForSubsystemFpII(bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, double, ValueType>;  // VT is imprecise
         std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
-
-        auto subsystemData = initializeSubsystemData<VT, false>(subsystemStates);
+        bool constexpr canHaveECs = optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize;
+        auto subsystemData = canHaveECs ? initializeSubsystemDataEliminateECs<VT, false>(subsystemStates) : initializeSubsystemData<VT, false>(subsystemStates);
 
         auto viOp = std::make_shared<storm::solver::helper::ValueIterationOperator<VT, !Nondeterministic>>();
         viOp->setMatrixBackwards(subsystemData.transitions);
@@ -231,13 +313,11 @@ class LowerUpperValueCertificateComputer {
         uint64_t numIterations = 0;
         iiHelper.II(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
                     optionalDir);  // TODO: relevant values?
-        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData.operands.first, globalLowerValues);
-        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData.operands.second, globalUpperValues);
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
     }
 
     void computeForSubsystemExPI(storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, ValueType, storm::RationalNumber>;  // VT is exact
-        std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
 
         auto subsystemData = initializeSubsystemData<VT, true>(subsystemStates);
 
@@ -293,9 +373,7 @@ class LowerUpperValueCertificateComputer {
             // TODO: relevant values?
             solver->solveEquations(env, subsystemData.operands, subsystemData.offsets);
         }
-        // TODO: handle the fact that we don't need to handle lower/upper bounds separately
-        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData.operands, globalLowerValues);
-        STORM_LOG_ASSERT(globalUpperValues.empty(), "Expected upper values not to be initialized.");
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
     }
 
     void computeForSubsystem(Algorithm alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
@@ -349,15 +427,37 @@ class LowerUpperValueCertificateComputer {
     storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix;
     storm::storage::BitVector const& terminalStates;
     storm::storage::BitVector const& prob1States;
+    // lower/upper values for each state. If the computation is exact, upper values are not used and remain empty.
     std::vector<ValueType> globalLowerValues, globalUpperValues;
-    storm::OptionalRef<storm::storage::BitVector> globalPossibleChoices;
 };
+
+template<typename ValueType>
+storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                  std::vector<ValueType> const& valueVector) {
+    storm::storage::BitVector inductiveChoices(transitionProbabilityMatrix.getRowCount(), false);
+    bool warnIfEmpty = true;
+    for (uint64_t state = 0; state < transitionProbabilityMatrix.getColumnCount(); ++state) {
+        bool stateHasInductiveChoice = false;
+        for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
+            ValueType choiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, valueVector);
+            if (choiceValue >= valueVector[state]) {
+                inductiveChoices.set(choice);
+                stateHasInductiveChoice = true;
+            }
+        }
+        if (!stateHasInductiveChoice) {
+            STORM_LOG_WARN_COND(!warnIfEmpty, "State " << state << " has no inductive choice. The certificate might not be valid");
+            warnIfEmpty = false;
+        }
+    }
+    return inductiveChoices;
+}
 
 template<typename ValueType, storm::OptimizationDirection Dir>
 std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType> computeLowerBoundRanking(
     storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
     storm::storage::BitVector const& targetStates, storm::OptionalRef<storm::storage::BitVector const> constraintStates,
-    storm::OptionalRef<storm::storage::BitVector const> choiceConstraint = storm::NullRef) {
+    std::optional<storm::storage::BitVector> const& choiceConstraint = std::nullopt) {
     using RankingType = typename ReachabilityProbabilityCertificate<ValueType>::RankingType;
     RankingType const InfRank = ReachabilityProbabilityCertificate<ValueType>::InfRank;
     auto const& rowGroupIndices = transitionProbabilityMatrix.getRowGroupIndices();
@@ -393,11 +493,10 @@ std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType>
                     choiceRank &= ranks[entry.getColumn()];
                 }
                 STORM_LOG_ASSERT(!choiceRank.empty(),
-                                 "Ranking operator failed to compute rank for state " << state << " since the row " << choiceConstraint << " is empty.");
+                                 "Ranking operator failed to compute rank for state " << state << " since the row " << currentChoice << " is empty.");
                 newRankMinusOne &= *choiceRank;
             }
-            STORM_LOG_ASSERT(!newRankMinusOne.empty(), "Ranking operator failed to compute rank for state " << state << ".");
-            if (*newRankMinusOne != InfRank) {
+            if (!newRankMinusOne.empty() && *newRankMinusOne != InfRank) {
                 ranks[preState] = *newRankMinusOne + 1;
                 stateQueue.push_back(preState);
             }
@@ -428,8 +527,12 @@ CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::
 
     auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
-    auto ranks = computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates,
-                                                          constraintStates);  // TODO: choice constraints for max reach
+    std::optional<storm::storage::BitVector> inductiveChoices;
+    if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize) {
+        inductiveChoices = computeInductiveChoices<ValueType>(transitionProbabilityMatrix, lowerValues);
+    }
+    auto ranks =
+        computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, constraintStates, inductiveChoices);
     return {std::move(lowerValues), std::move(upperValues), std::move(ranks)};
 }
 
