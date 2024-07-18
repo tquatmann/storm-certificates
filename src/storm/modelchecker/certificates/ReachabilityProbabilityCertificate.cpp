@@ -137,14 +137,9 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
 
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
             auto currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values);
-            if (stateValue &= currentChoiceValue) {
-                // New optimal value found! reset rank if we're maximizing
-                if (storm::solver::maximize(Dir)) {
-                    stateRankMinusOne.reset();
-                }
-            }
-            if (storm::solver::minimize(Dir) || *stateValue == currentChoiceValue) {
-                // Compute rank for this choice
+            stateValue &= currentChoiceValue;
+            // Compute rank for this choice if we're minimizing or if the choice is inductive
+            if (storm::solver::minimize(Dir) || currentChoiceValue >= values[state]) {
                 storm::utility::Minimum<RankingType> choiceRank;
                 for (auto const& entry : transitionProbabilityMatrix.getRow(choice)) {
                     if (storm::utility::isZero(entry.getValue())) {
@@ -163,6 +158,11 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
             STORM_LOG_WARN("Certificate invalid because lower bound is not inductive. At state " << state << " the Bellman operator yields " << *stateValue
                                                                                                  << " but the certificate has larger value " << values[state]
                                                                                                  << ". Approx. diff is " << approxDiff << ".");
+            return false;
+        }
+        if (stateRankMinusOne.empty()) {
+            STORM_LOG_WARN("Certificate invalid because there is no valid (i.e. inductive) action at state " << state << ", where the certificate has rank "
+                                                                                                             << ranks[state] << ".");
             return false;
         }
         STORM_LOG_ASSERT(!stateRankMinusOne.empty(), "Ranking operator failed to compute rank for state " << state << ".");
