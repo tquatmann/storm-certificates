@@ -37,7 +37,12 @@ struct LowerUpperValueCertificateComputerReturnType {
 template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir>
 class LowerUpperValueCertificateComputer {
    public:
-    enum class Algorithm { FpII, ExPI };
+    enum class AlgorithmType { FpII, FpSmoothII, ExPI };
+    struct Algorithm {
+        AlgorithmType type;
+        ValueType gamma;
+        ValueType delta;
+    };
 
     LowerUpperValueCertificateComputer(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
                                        storm::storage::BitVector const& terminalStates, storm::storage::BitVector const& prob1States)
@@ -47,12 +52,16 @@ class LowerUpperValueCertificateComputer {
         auto const& certSettings = storm::settings::getModule<storm::settings::modules::CertificationSettings>();
 
         auto algStr = certSettings.getMethod();
+        AlgorithmType algType;
         if (algStr == "fp-ii") {
-            return Algorithm::FpII;
+            algType = AlgorithmType::FpII;
+        } else if (algStr == "fp-smoothii") {
+            algType = AlgorithmType::FpSmoothII;
         } else {
             assert(algStr == "ex-pi");
-            return Algorithm::ExPI;
+            algType = AlgorithmType::ExPI;
         }
+        return {algType, storm::utility::convertNumber<ValueType>(certSettings.getGamma()), storm::utility::convertNumber<ValueType>(certSettings.getDelta())};
     }
 
     LowerUpperValueCertificateComputerReturnType<ValueType> compute(bool relative, ValueType const& precision) {
@@ -84,18 +93,18 @@ class LowerUpperValueCertificateComputer {
         std::optional<std::vector<uint64_t>> originalToReducedStateMapping;
     };
 
-    void initializeValueVectors(Algorithm alg) {
+    void initializeValueVectors(Algorithm const& alg) {
         // Lower values
         globalLowerValues.assign(terminalStates.size(), storm::utility::zero<ValueType>());
         storm::utility::vector::setVectorValues(globalLowerValues, prob1States, storm::utility::one<ValueType>());
 
         // Upper Values
-        if (alg == Algorithm::FpII) {
+        if (alg.type == AlgorithmType::FpII || alg.type == AlgorithmType::FpSmoothII) {
             globalUpperValues.assign(terminalStates.size(), storm::utility::one<ValueType>());
             auto prob0States = terminalStates ^ prob1States;
             storm::utility::vector::setVectorValues(globalUpperValues, prob0States, storm::utility::zero<ValueType>());
         } else {
-            STORM_LOG_ASSERT(alg == Algorithm::ExPI, "Unsupported algorithm.");
+            STORM_LOG_ASSERT(alg.type == AlgorithmType::ExPI, "Unsupported algorithm.");
             globalUpperValues.clear();  // Do not use upper values for this.
         }
     }
@@ -301,7 +310,7 @@ class LowerUpperValueCertificateComputer {
         }
     }
 
-    void computeForSubsystemFpII(bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
+    void computeForSubsystemFpII(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, double, ValueType>;  // VT is imprecise
         std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
         bool constexpr canHaveECs = optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize;
@@ -311,8 +320,15 @@ class LowerUpperValueCertificateComputer {
         viOp->setMatrixBackwards(subsystemData.transitions);
         storm::solver::helper::IntervalIterationHelper<VT, !Nondeterministic> iiHelper(viOp);
         uint64_t numIterations = 0;
-        iiHelper.II(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
-                    optionalDir);  // TODO: relevant values?
+        if (alg.type == AlgorithmType::FpII) {
+            iiHelper.II(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
+                        optionalDir);  // TODO: relevant values?
+        } else {
+            STORM_LOG_ASSERT(alg.type == AlgorithmType::FpSmoothII, "Unsupported algorithm.");
+            iiHelper.smoothII(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
+                              storm::utility::convertNumber<VT>(alg.gamma), storm::utility::convertNumber<VT>(alg.delta),
+                              optionalDir);  // TODO: relevant values?
+        }
         setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
     }
 
@@ -378,12 +394,13 @@ class LowerUpperValueCertificateComputer {
         setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
     }
 
-    void computeForSubsystem(Algorithm alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
-        switch (alg) {
-            case Algorithm::FpII:
-                computeForSubsystemFpII(relative, precision, subsystemStates);
+    void computeForSubsystem(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
+        switch (alg.type) {
+            case AlgorithmType::FpII:
+            case AlgorithmType::FpSmoothII:
+                computeForSubsystemFpII(alg, relative, precision, subsystemStates);
                 break;
-            case Algorithm::ExPI:
+            case AlgorithmType::ExPI:
                 computeForSubsystemExPI(subsystemStates);
                 break;
             default:
@@ -391,7 +408,7 @@ class LowerUpperValueCertificateComputer {
         }
     }
 
-    void computeTopological(Algorithm alg, bool relative, ValueType const& precision, storm::storage::BitVector const& nonTerminalStates) {
+    void computeTopological(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& nonTerminalStates) {
         STORM_LOG_TRACE("Creating SCC decomposition.");
         storm::utility::Stopwatch sccSw(true);
         storm::storage::StronglyConnectedComponentDecomposition<ValueType> const sccDecomposition(

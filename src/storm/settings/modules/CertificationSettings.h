@@ -20,6 +20,9 @@ class CertificationSettings : public ModuleSettings {
 
     std::string getMethod() const;
 
+    double getGamma() const;
+    double getDelta() const;
+
     bool check() const override;
 
     // The name of the module.

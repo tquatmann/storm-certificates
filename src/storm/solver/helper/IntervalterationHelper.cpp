@@ -17,9 +17,14 @@ IntervalIterationHelper<ValueType, TrivialRowGrouping>::IntervalIterationHelper(
     // Intentionally left empty.
 }
 
-template<typename ValueType, OptimizationDirection Dir>
+template<typename ValueType, OptimizationDirection Dir, bool Smooth>
 class IIBackend {
    public:
+    IIBackend(ValueType const& gamma, ValueType const& delta) : gamma(gamma), delta(delta) {}
+    IIBackend() : gamma(0.0), delta(0.0) {
+        STORM_LOG_ASSERT(!Smooth, "Gamma and delta must be set for smooth interval iteration.");
+    }
+
     void startNewIteration() {}
 
     void firstRow(std::pair<ValueType, ValueType>&& value, [[maybe_unused]] uint64_t rowGroup, [[maybe_unused]] uint64_t row) {
@@ -33,8 +38,19 @@ class IIBackend {
     }
 
     void applyUpdate(ValueType& xCurr, ValueType& yCurr, [[maybe_unused]] uint64_t rowGroup) {
-        xCurr = std::max(xCurr, *xBest);
-        yCurr = std::min(yCurr, *yBest);
+        if constexpr (Smooth) {
+            if (*xBest > xCurr) {
+                auto const diff = *xBest - xCurr;
+                xCurr = *xBest - gamma * diff;  // = gamma * xCurr + (1-gamma) * xBest
+            }
+            if (*yBest < yCurr) {
+                auto const diff = yCurr - *yBest;
+                yCurr = *yBest + gamma * diff;  // = gamma * yCurr + (1-gamma) * yBest
+            }
+        } else {
+            xCurr = std::max(xCurr, *xBest);
+            yCurr = std::min(yCurr, *yBest);
+        }
     }
 
     void endOfIteration() const {
@@ -51,6 +67,7 @@ class IIBackend {
 
    private:
     storm::utility::Extremum<Dir, ValueType> xBest, yBest;
+    ValueType const gamma, delta;
 };
 
 template<typename ValueType>
@@ -85,14 +102,15 @@ bool checkConvergence(std::pair<std::vector<ValueType>, std::vector<ValueType>> 
 }
 
 template<typename ValueType, bool TrivialRowGrouping>
-template<OptimizationDirection Dir, typename OffsetType>
+template<OptimizationDirection Dir, typename OffsetType, bool Smooth>
 SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
                                                                         OffsetType const& offsets, uint64_t& numIterations, bool relative,
                                                                         ValueType const& precision,
                                                                         std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback,
-                                                                        std::optional<storm::storage::BitVector> const& relevantValues) const {
+                                                                        std::optional<storm::storage::BitVector> const& relevantValues, ValueType const& gamma,
+                                                                        ValueType const& delta) const {
     SolverStatus status{SolverStatus::InProgress};
-    IIBackend<ValueType, Dir> backend;
+    IIBackend<ValueType, Dir, Smooth> backend(gamma, delta);
     uint64_t convergenceCheckState = 0;
     std::function<void()> getNextConvergenceCheckState;
     if (relevantValues) {
@@ -126,6 +144,23 @@ SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pai
         return II<OptimizationDirection::Maximize>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues);
     } else {
         return II<OptimizationDirection::Minimize>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues);
+    }
+}
+
+template<typename ValueType, bool TrivialRowGrouping>
+SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::smoothII(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
+                                                                              std::pair<std::vector<ValueType>, std::vector<ValueType>> const& offsets,
+                                                                              uint64_t& numIterations, bool relative, ValueType const& precision,
+                                                                              ValueType const& gamma, ValueType const& delta,
+                                                                              std::optional<storm::OptimizationDirection> const& dir,
+                                                                              std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback,
+                                                                              std::optional<storm::storage::BitVector> const& relevantValues) const {
+    if (!dir.has_value() || maximize(*dir)) {
+        return II<OptimizationDirection::Maximize, decltype(offsets), true>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues,
+                                                                            gamma, delta);
+    } else {
+        return II<OptimizationDirection::Minimize, decltype(offsets), true>(xy, offsets, numIterations, relative, precision, iterationCallback, relevantValues,
+                                                                            gamma, delta);
     }
 }
 
