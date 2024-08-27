@@ -42,10 +42,20 @@ class IIBackend {
             if (*xBest > xCurr) {
                 auto const diff = *xBest - xCurr;
                 xCurr = *xBest - gamma * diff;  // = gamma * xCurr + (1-gamma) * xBest
+                if constexpr (std::is_same_v<ValueType, double>) {
+                    if (xCurr == *xBest) {
+                        xCurr = std::nextafter(xCurr, xCurr - 1.0);
+                    }
+                }
             }
             if (*yBest < yCurr) {
                 auto const diff = yCurr - *yBest;
                 yCurr = *yBest + gamma * diff;  // = gamma * yCurr + (1-gamma) * yBest
+                if constexpr (std::is_same_v<ValueType, double>) {
+                    if (yCurr == *yBest) {
+                        yCurr = std::nextafter(yCurr, yCurr + 1.0);
+                    }
+                }
             }
         } else {
             xCurr = std::max(xCurr, *xBest);
