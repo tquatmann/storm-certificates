@@ -5,21 +5,20 @@
 #include "storm/exceptions/InvalidStateException.h"
 #include "storm/exceptions/NotImplementedException.h"
 #include "storm/logic/FragmentSpecification.h"
+#include "storm/modelchecker/certificates/computation/ReachabilityCertificateComputer.h"
 #include "storm/modelchecker/csl/helper/SparseCtmcCslHelper.h"
 #include "storm/modelchecker/helper/indefinitehorizon/visitingtimes/SparseDeterministicVisitingTimesHelper.h"
 #include "storm/modelchecker/helper/infinitehorizon/SparseDeterministicInfiniteHorizonHelper.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
 #include "storm/modelchecker/helper/utility/SetInformationFromCheckTask.h"
 #include "storm/modelchecker/prctl/helper/SparseDtmcPrctlHelper.h"
+#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQualitativeCheckResult.h"
 #include "storm/modelchecker/results/ExplicitQuantitativeCheckResult.h"
 #include "storm/models/sparse/StandardRewardModel.h"
 #include "storm/utility/FilteredRewardModel.h"
 #include "storm/utility/graph.h"
 #include "storm/utility/macros.h"
-#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
-#include "storm/modelchecker/results/ExplicitCertificateCheckResult.h"
-
 
 namespace storm {
 namespace modelchecker {
@@ -206,11 +205,28 @@ std::unique_ptr<CheckResult> SparseCtmcCslModelChecker<SparseCtmcModelType>::com
     std::unique_ptr<CheckResult> subResultPointer = this->check(env, eventuallyFormula.getSubformula());
     ExplicitQualitativeCheckResult const& subResult = subResultPointer->asExplicitQualitativeCheckResult();
     auto rewardModel = storm::utility::createFilteredRewardModel(this->getModel(), checkTask);
-    std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeReachabilityRewards(
-        env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), rewardModel.get(), subResult.getTruthValuesVector(),
-        checkTask.isQualitativeSet());
-    return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability rewards with certificate ...");
+        if constexpr (std::is_same_v<ValueType, storm::RationalFunction>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
+        } else {
+            auto probabilisticTransitions = this->getModel().computeProbabilityMatrix();
+            auto weights = this->getModel().getExitRateVector();
+            std::transform(weights.begin(), weights.end(), weights.begin(), [](auto const& rate) { return storm::utility::one<ValueType>() / rate; });
+            auto rewardVector = rewardModel.get().getTotalActionRewardVector(probabilisticTransitions, weights);
+            auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(
+                env, std::nullopt, std::move(probabilisticTransitions), subResult.getTruthValuesVector(), std::move(rewardVector),
+                eventuallyFormula.getSubformula().toString(), checkTask.isRewardModelSet() ? checkTask.getRewardModel() : "");
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeReachabilityRewards(
+            env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), rewardModel.get(), subResult.getTruthValuesVector(),
+            checkTask.isQualitativeSet());
+        return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    }
 }
 
 template<typename SparseCtmcModelType>
@@ -255,11 +271,26 @@ std::unique_ptr<CheckResult> SparseCtmcCslModelChecker<SparseCtmcModelType>::com
     storm::logic::EventuallyFormula const& eventuallyFormula = checkTask.getFormula();
     std::unique_ptr<CheckResult> subResultPointer = this->check(env, eventuallyFormula.getSubformula());
     ExplicitQualitativeCheckResult& subResult = subResultPointer->asExplicitQualitativeCheckResult();
-
-    std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeReachabilityTimes(
-        env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet());
-    return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability rewards with certificate ...");
+        if constexpr (std::is_same_v<ValueType, storm::RationalFunction>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
+        } else {
+            auto probabilisticTransitions = this->getModel().computeProbabilityMatrix();
+            auto weights = this->getModel().getExitRateVector();
+            std::transform(weights.begin(), weights.end(), weights.begin(), [](auto const& rate) { return storm::utility::one<ValueType>() / rate; });
+            auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(env, std::nullopt, std::move(probabilisticTransitions),
+                                                                                         subResult.getTruthValuesVector(), std::move(weights),
+                                                                                         eventuallyFormula.getSubformula().toString(), "time");
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        std::vector<ValueType> numericResult = storm::modelchecker::helper::SparseCtmcCslHelper::computeReachabilityTimes(
+            env, storm::solver::SolveGoal<ValueType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), this->getModel().getExitRateVector(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet());
+        return std::unique_ptr<CheckResult>(new ExplicitQuantitativeCheckResult<ValueType>(std::move(numericResult)));
+    }
 }
 
 template<typename SparseCtmcModelType>

@@ -20,14 +20,11 @@ class SparseMatrix;
 namespace modelchecker {
 
 template<typename ValueType>
-class ReachabilityProbabilityCertificate : public Certificate<ValueType> {
+class ReachabilityRewardCertificate : public Certificate<ValueType> {
    public:
-    ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
-                                       std::string targetLabel = "goal");
-    ReachabilityProbabilityCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
-                                       storm::storage::BitVector constraintStates, std::string targetLabel = "goal",
-                                       std::string constraintLabel = "constraint");
-    virtual ~ReachabilityProbabilityCertificate() = default;
+    ReachabilityRewardCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
+                                  std::vector<ValueType> stateActionRewardVector, std::string targetLabel = "goal", std::string rewardModelName = "");
+    virtual ~ReachabilityRewardCertificate() = default;
     virtual bool checkValidity(storm::models::Model<ValueType> const& model) const override;
     bool checkValidity(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix) const;
     virtual storm::json<ValueType> toJson() const override;
@@ -36,22 +33,23 @@ class ReachabilityProbabilityCertificate : public Certificate<ValueType> {
     virtual std::unique_ptr<Certificate<ValueType>> clone() const override;
 
     void setLowerBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks);
-    void setUpperBoundsCertificate(std::vector<ValueType>&& values);
+    void setUpperBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks);
 
     bool hasLowerBoundsCertificate() const;
     bool hasUpperBoundsCertificate() const;
 
    private:
-    bool hasConstraintStates() const;
     template<storm::OptimizationDirection Dir>
     bool checkValidityInternal(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix) const;
 
-    storm::storage::BitVector const targetStates, constraintStates;
-    std::string const targetLabel, constraintLabel;
+    storm::storage::BitVector const targetStates;
+    std::vector<ValueType> const stateActionRewardVector;
+    std::string const targetLabel, rewardModelName;
     std::optional<storm::OptimizationDirection> const dir;
 
     struct {
         std::vector<ValueType> values;
+        std::vector<RankingType> ranks;
     } upperBoundsCertificate;
 
     struct {

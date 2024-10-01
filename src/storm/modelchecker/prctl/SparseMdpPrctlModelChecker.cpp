@@ -3,7 +3,7 @@
 #include "storm/exceptions/InvalidPropertyException.h"
 #include "storm/exceptions/InvalidStateException.h"
 #include "storm/logic/FragmentSpecification.h"
-#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
+#include "storm/modelchecker/certificates/computation/ReachabilityCertificateComputer.h"
 #include "storm/modelchecker/helper/finitehorizon/SparseNondeterministicStepBoundedHorizonHelper.h"
 #include "storm/modelchecker/helper/infinitehorizon/SparseNondeterministicInfiniteHorizonHelper.h"
 #include "storm/modelchecker/helper/ltl/SparseLTLHelper.h"
@@ -359,15 +359,30 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
     std::unique_ptr<CheckResult> subResultPointer = this->check(env, eventuallyFormula.getSubformula());
     ExplicitQualitativeCheckResult const& subResult = subResultPointer->asExplicitQualitativeCheckResult();
     auto rewardModel = storm::utility::createFilteredRewardModel(this->getModel(), checkTask);
-    auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeReachabilityRewards(
-        env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), rewardModel.get(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet(),
-        checkTask.isProduceSchedulersSet(), checkTask.getHint());
-    std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
-    if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
-        result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability rewards with certificate ...");
+        if constexpr (std::is_same_v<ValueType, storm::Interval>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
+        } else {
+            STORM_LOG_WARN_COND(!checkTask.isProduceSchedulersSet(), "Scheduler generation with certificates not implemented.");
+            auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(
+                env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), subResult.getTruthValuesVector(),
+                rewardModel.get().getTotalRewardVector(this->getModel().getTransitionMatrix()), eventuallyFormula.getSubformula().toString(),
+                checkTask.isRewardModelSet() ? checkTask.getRewardModel() : "");
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeReachabilityRewards(
+            env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), rewardModel.get(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet(),
+            checkTask.isProduceSchedulersSet(), checkTask.getHint());
+        std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
+        if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
+            result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+        }
+        return result;
     }
-    return result;
 }
 
 template<typename SparseMdpModelType>
@@ -378,15 +393,30 @@ std::unique_ptr<CheckResult> SparseMdpPrctlModelChecker<SparseMdpModelType>::com
                     "Formula needs to specify whether minimal or maximal values are to be computed on nondeterministic model.");
     std::unique_ptr<CheckResult> subResultPointer = this->check(env, eventuallyFormula.getSubformula());
     ExplicitQualitativeCheckResult const& subResult = subResultPointer->asExplicitQualitativeCheckResult();
-    auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeReachabilityTimes(
-        env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
-        this->getModel().getBackwardTransitions(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet(), checkTask.isProduceSchedulersSet(),
-        checkTask.getHint());
-    std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
-    if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
-        result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+    if (checkTask.isProduceCertificateSet()) {
+        STORM_LOG_INFO("Computing reachability times with certificate ...");
+        if constexpr (std::is_same_v<ValueType, storm::Interval>) {
+            STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "We have not yet implemented certificates with intervals");
+        } else {
+            STORM_LOG_WARN_COND(!checkTask.isProduceSchedulersSet(), "Scheduler generation with certificates not implemented.");
+            auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(
+                env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), subResult.getTruthValuesVector(),
+                std::vector<ValueType>(this->getModel().getNumberOfChoices(), storm::utility::one<ValueType>()), eventuallyFormula.getSubformula().toString(),
+                "time");
+            storm::storage::BitVector allStates(this->getModel().getNumberOfStates(), true);
+            return std::make_unique<ExplicitCertificateCheckResult<ValueType>>(std::move(certificate), std::move(allStates));
+        }
+    } else {
+        auto ret = storm::modelchecker::helper::SparseMdpPrctlHelper<ValueType, SolutionType>::computeReachabilityTimes(
+            env, storm::solver::SolveGoal<ValueType, SolutionType>(this->getModel(), checkTask), this->getModel().getTransitionMatrix(),
+            this->getModel().getBackwardTransitions(), subResult.getTruthValuesVector(), checkTask.isQualitativeSet(), checkTask.isProduceSchedulersSet(),
+            checkTask.getHint());
+        std::unique_ptr<CheckResult> result(new ExplicitQuantitativeCheckResult<SolutionType>(std::move(ret.values)));
+        if (checkTask.isProduceSchedulersSet() && ret.scheduler) {
+            result->asExplicitQuantitativeCheckResult<SolutionType>().setScheduler(std::move(ret.scheduler));
+        }
+        return result;
     }
-    return result;
 }
 
 template<typename SparseMdpModelType>

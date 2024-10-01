@@ -37,7 +37,8 @@ class ReachabilityProbabilityToRewardTransformer {
         auto [prob01States, prob1States] = storm::utility::graph::performProb01(backwardTransitionCache.get(), constraintStates.value(), targetStates);
         prob01States |= prob1States;
 
-        return TotalRewardSpecification<ValueType>{std::move(prob01States), {{TerminalStateValue<ValueType>::getOne(), std::move(prob1States)}}, true};
+        return TotalRewardSpecification<ValueType>{
+            std::move(prob01States), {{TerminalStateValue<ValueType>::getOne(), std::move(prob1States)}}, true, storm::NullRef};
     }
 
     TotalRewardSpecification<ValueType> transform(std::optional<storm::OptimizationDirection> dir, StateSet const& targetStates,
@@ -58,7 +59,7 @@ class ReachabilityProbabilityToRewardTransformer {
                                                                                          backwardTransitionCache.get(), constraintStates.value(), targetStates);
         prob01States |= prob1States;
         return TotalRewardSpecification<ValueType>{
-            std::move(prob01States), {{TerminalStateValue<ValueType>::getOne(), std::move(prob1States)}}, storm::solver::minimize(*dir)};
+            std::move(prob01States), {{TerminalStateValue<ValueType>::getOne(), std::move(prob1States)}}, storm::solver::minimize(*dir), storm::NullRef};
     }
 
     storm::storage::SparseMatrix<ValueType> transitionMatrix;

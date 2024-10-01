@@ -2,5 +2,5 @@
 
 namespace storm::modelchecker {
 
-enum class CertificateKind { ReachabilityProbability };
+enum class CertificateKind { ReachabilityProbability, ReachabilityRewards };
 }

@@ -6,8 +6,12 @@
 #include "storm/environment/solver/EigenSolverEnvironment.h"
 #include "storm/environment/solver/MinMaxSolverEnvironment.h"
 #include "storm/exceptions/UnmetRequirementException.h"
+#include "storm/modelchecker/certificates/RankingType.h"
 #include "storm/modelchecker/certificates/ReachabilityProbabilityCertificate.h"
+#include "storm/modelchecker/certificates/ReachabilityRewardCertificate.h"
 #include "storm/modelchecker/reachability/ReachabilityProbabilityToRewardTransformer.h"
+#include "storm/modelchecker/totalreward/LowerUpperBoundsComputer.h"
+#include "storm/modelchecker/totalreward/ReachabilityRewardTransformer.h"
 #include "storm/solver/IterativeMinMaxLinearEquationSolver.h"
 #include "storm/solver/LinearEquationSolver.h"
 #include "storm/solver/MinMaxLinearEquationSolver.h"
@@ -45,8 +49,8 @@ class LowerUpperValueCertificateComputer {
     };
 
     LowerUpperValueCertificateComputer(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                       storm::storage::BitVector const& terminalStates, storm::storage::BitVector const& prob1States)
-        : transitionProbabilityMatrix(transitionProbabilityMatrix), terminalStates(terminalStates), prob1States(prob1States) {}
+                                       TotalRewardSpecification<ValueType> const& totalRewardSpecification)
+        : transitionProbabilityMatrix(transitionProbabilityMatrix), totalRewardSpecification(totalRewardSpecification) {}
 
     Algorithm getAlgorithm() const {
         auto const& certSettings = storm::settings::getModule<storm::settings::modules::CertificationSettings>();
@@ -69,9 +73,9 @@ class LowerUpperValueCertificateComputer {
         auto alg = getAlgorithm();
         initializeValueVectors(alg);
         if (certSettings.isUseTopologicalSet()) {
-            computeTopological(alg, relative, precision, ~terminalStates);
+            computeTopological(alg, relative, precision, ~totalRewardSpecification.terminalStates);
         } else {
-            computeForSubsystem(alg, relative, precision, ~terminalStates);
+            computeForSubsystem(alg, relative, precision, ~totalRewardSpecification.terminalStates);
         }
         if (globalUpperValues.empty()) {
             // Exact methods do not populate the upper values.
@@ -88,32 +92,51 @@ class LowerUpperValueCertificateComputer {
         using ValueVectorType = std::conditional_t<SingleValue, std::vector<VT>, std::pair<std::vector<VT>, std::vector<VT>>>;
         ValueVectorType offsets;
         ValueVectorType operands;
+        std::optional<std::vector<VT>> exitProbabilities;  // for each row the probability to exit the subsystem
         // if originalToReducedStateMapping is given, this subsystem has been reduced and the ith entry is the index in the reduced system corresponding to
         // the ith subsystem state
         std::optional<std::vector<uint64_t>> originalToReducedStateMapping;
     };
 
     void initializeValueVectors(Algorithm const& alg) {
-        // Lower values
-        globalLowerValues.assign(terminalStates.size(), storm::utility::zero<ValueType>());
-        storm::utility::vector::setVectorValues(globalLowerValues, prob1States, storm::utility::one<ValueType>());
+        // Initialize value vector and set values for terminal states.
+        uint64_t const numberOfStates = totalRewardSpecification.terminalStates.size();
+        globalLowerValues.assign(numberOfStates, storm::utility::zero<ValueType>());
+        for (auto const& [value, stateSet] : totalRewardSpecification.terminalStateValues) {
+            if (value.isFinite()) {
+                storm::utility::vector::setVectorValues(globalLowerValues, stateSet, value.getFiniteValue());
+            } else {
+                STORM_LOG_ASSERT(value.isPositiveInfinity(), "Unexpected terminal state value.");
+                // Note: We need to be careful to not do any actual calculations with infinity,
+                // in particular because infinity is not nicely represented with rational numbers.
+                storm::utility::vector::setVectorValues(globalLowerValues, stateSet, storm::utility::infinity<ValueType>());
+            }
+        }
+        // We assume that 0 is a valid lower bound for all states.
+        STORM_LOG_ASSERT(!totalRewardSpecification.actionRewards.has_value() ||
+                             std::all_of(totalRewardSpecification.actionRewards->begin(), totalRewardSpecification.actionRewards->end(),
+                                         [](auto const& v) { return v >= storm::utility::zero<ValueType>(); }),
+                         "Negative rewards are not supported.");
 
-        // Upper Values
+        // Initialize second vector for upper bounds (if needed by the selected algorithm)
         if (alg.type == AlgorithmType::FpII || alg.type == AlgorithmType::FpSmoothII) {
-            globalUpperValues.assign(terminalStates.size(), storm::utility::one<ValueType>());
-            auto prob0States = terminalStates ^ prob1States;
-            storm::utility::vector::setVectorValues(globalUpperValues, prob0States, storm::utility::zero<ValueType>());
+            globalUpperValues = globalLowerValues;
+
         } else {
             STORM_LOG_ASSERT(alg.type == AlgorithmType::ExPI, "Unsupported algorithm.");
             globalUpperValues.clear();  // Do not use upper values for this.
         }
     }
 
-    storm::storage::BitVector getSubsystemExitChoices(storm::storage::BitVector const& subsystem, uint64_t numSubystemRows) const {
+    storm::storage::BitVector getSubsystemExitChoices(storm::storage::BitVector const& subsystem, uint64_t numSubystemRows,
+                                                      std::optional<storm::storage::BitVector> const& optionalSubsystemChoices) const {
         storm::storage::BitVector result(numSubystemRows, false);
         uint64_t currSubsystemRow = 0;
         for (auto const state : subsystem) {
             for (auto const rowIndex : transitionProbabilityMatrix.getRowGroupIndices(state)) {
+                if (optionalSubsystemChoices.has_value() && !optionalSubsystemChoices->get(rowIndex)) {
+                    continue;
+                }
                 auto row = transitionProbabilityMatrix.getRow(rowIndex);
                 if (std::any_of(row.begin(), row.end(), [&subsystem](auto const& entry) { return !subsystem.get(entry.getColumn()); })) {
                     result.set(currSubsystemRow);
@@ -125,13 +148,15 @@ class LowerUpperValueCertificateComputer {
     }
 
     template<typename VT>
-    std::vector<VT> getSubsystemExitValues(storm::storage::BitVector const& subsystem, storm::storage::BitVector const& subsystemExitChoices,
-                                           std::vector<ValueType> const& globalValues) const {
+    std::vector<VT> getSubsystemOffsets(storm::storage::BitVector const& subsystem, storm::storage::BitVector const& subsystemExitChoices,
+                                        std::vector<ValueType> const& globalValues) const {
         std::vector<VT> result;
         result.reserve(subsystemExitChoices.size());
         for (auto const state : subsystem) {
             for (auto const rowIndex : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-                auto rowValue = storm::utility::zero<VT>();
+                auto rowValue = totalRewardSpecification.actionRewards.has_value()
+                                    ? storm::utility::convertNumber<VT>(totalRewardSpecification.actionRewards.value()[rowIndex])
+                                    : storm::utility::zero<VT>();
                 if (subsystemExitChoices.get(result.size())) {
                     for (auto const& entry : transitionProbabilityMatrix.getRow(rowIndex)) {
                         if (!subsystem.get(entry.getColumn())) {
@@ -148,8 +173,46 @@ class LowerUpperValueCertificateComputer {
     }
 
     template<typename VT>
-    storm::storage::SparseMatrix<VT> getSubsystemMatrix(storm::storage::BitVector const& subsystem) const {
-        auto subMatrix = transitionProbabilityMatrix.getSubmatrix(true, subsystem, subsystem);
+    std::vector<VT> getSubsystemExitProbabilities(storm::storage::BitVector const& subsystem, storm::storage::BitVector const& subsystemExitChoices) const {
+        std::vector<VT> result;
+        result.reserve(subsystemExitChoices.size());
+        for (auto const state : subsystem) {
+            for (auto const rowIndex : transitionProbabilityMatrix.getRowGroupIndices(state)) {
+                auto rowValue = storm::utility::zero<VT>();
+                if (subsystemExitChoices.get(result.size())) {
+                    for (auto const& entry : transitionProbabilityMatrix.getRow(rowIndex)) {
+                        if (!subsystem.get(entry.getColumn())) {
+                            rowValue += storm::utility::convertNumber<VT, ValueType>(entry.getValue());
+                        }
+                    }
+                }
+                result.push_back(std::move(rowValue));
+            }
+        }
+        result.shrink_to_fit();
+        STORM_LOG_ASSERT(result.size() == subsystemExitChoices.size(), "Unexpected number of rows in subsystem.");
+        return result;
+    }
+
+    std::optional<storm::storage::BitVector> getSubsystemChoicesIfNonTrivial(storm::storage::BitVector const& subsystem) const {
+        STORM_LOG_ASSERT(totalRewardSpecification.terminalStateValues.size() == 1, "Unexpected number of terminal state values.");
+        STORM_LOG_ASSERT(subsystem.isDisjointFrom(totalRewardSpecification.terminalStates), "subsystem contains terminal state.");
+        auto const& [value, stateSet] = totalRewardSpecification.terminalStateValues.front();
+        STORM_LOG_ASSERT(value.isFinite() || value.isPositiveInfinity(), "Unexpected terminal state value.");
+        if (storm::solver::minimize(Dir) && value.isPositiveInfinity()) {
+            // We have an infinite terminal state value, so we need to cut away all choices leading to those states.
+            return transitionProbabilityMatrix.getRowFilter(subsystem, ~stateSet);
+        }
+        return std::nullopt;
+    }
+
+    template<typename VT>
+    storm::storage::SparseMatrix<VT> getSubsystemMatrix(storm::storage::BitVector const& subsystemStates,
+                                                        std::optional<storm::storage::BitVector> const& subsystemChoices) const {
+        storm::storage::SparseMatrix<ValueType> subMatrix = subsystemChoices.has_value()
+                                                                ? transitionProbabilityMatrix.getSubmatrix(false, *subsystemChoices, subsystemStates)
+                                                                : transitionProbabilityMatrix.getSubmatrix(true, subsystemStates, subsystemStates);
+        // Convert to desired value type
         if constexpr (std::is_same_v<VT, ValueType>) {
             return subMatrix;
         } else {
@@ -157,59 +220,78 @@ class LowerUpperValueCertificateComputer {
         }
     }
 
-    template<typename VT>
-    std::vector<VT> getSubsystemOperands(storm::storage::BitVector const& subsystem, uint64_t numSubystemRowGroups,
-                                         std::vector<ValueType> const& globalValues) const {
-        std::vector<VT> result;
-        result.reserve(numSubystemRowGroups);
-        for (uint64_t i : subsystem) {
-            result.push_back(storm::utility::convertNumber<VT>(globalValues[i]));
-        }
-        return result;
-    }
-
     template<typename VT, bool SingleValue>
-    SubsystemData<VT, SingleValue> initializeSubsystemData(storm::storage::BitVector const& subsystem) const {
-        auto result = SubsystemData<VT, SingleValue>{getSubsystemMatrix<VT>(subsystem), {}, {}, {}, {}};
-        result.exitChoices = getSubsystemExitChoices(subsystem, result.transitions.getRowCount());
+    SubsystemData<VT, SingleValue> initializeSubsystemData(storm::storage::BitVector const& subsystem, bool const computeInitialBounds) const {
+        auto optionalSubsystemChoices = getSubsystemChoicesIfNonTrivial(subsystem);
+        auto result = SubsystemData<VT, SingleValue>{getSubsystemMatrix<VT>(subsystem, optionalSubsystemChoices), {}, {}, {}, {}, {}};
+        result.exitChoices = getSubsystemExitChoices(subsystem, result.transitions.getRowCount(), optionalSubsystemChoices);
         if constexpr (SingleValue) {
             STORM_LOG_ASSERT(globalUpperValues.empty(), "Expected upper values not to be initialized.");
-            result.offsets = getSubsystemExitValues<VT>(subsystem, result.exitChoices, globalLowerValues);
-            result.operands = getSubsystemOperands<VT>(subsystem, result.transitions.getRowCount(), globalLowerValues);
+            result.offsets = getSubsystemOffsets<VT>(subsystem, result.exitChoices, globalLowerValues);
         } else {
             STORM_LOG_ASSERT(!globalUpperValues.empty(), "Expected upper values to be initialized.");
-            result.offsets = {getSubsystemExitValues<VT>(subsystem, result.exitChoices, globalLowerValues),
-                              getSubsystemExitValues<VT>(subsystem, result.exitChoices, globalUpperValues)};
-            result.operands = {getSubsystemOperands<VT>(subsystem, result.transitions.getRowCount(), globalLowerValues),
-                               getSubsystemOperands<VT>(subsystem, result.transitions.getRowCount(), globalUpperValues)};
+            result.offsets = {getSubsystemOffsets<VT>(subsystem, result.exitChoices, globalLowerValues),
+                              getSubsystemOffsets<VT>(subsystem, result.exitChoices, globalUpperValues)};
         }
+        if (computeInitialBounds) {
+            result.exitProbabilities = getSubsystemExitProbabilities<VT>(subsystem, result.exitChoices);
+        }
+        if (!totalRewardSpecification.terminalStatesUniversallyAlmostSurelyReached) {
+            result = eliminateECs(std::move(result));
+        }
+        if (computeInitialBounds) {
+            std::optional<storm::OptimizationDirection> constexpr optionalDir =
+                Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
+            storm::OptionalRef<std::vector<VT>> lowerBounds, upperBounds;
+            if constexpr (SingleValue) {
+                result.operands = computeLowerOrUpperBoundsTotalReward<VT, true>(result.transitions, result.offsets, result.exitChoices,
+                                                                                 result.exitProbabilities.value(), optionalDir);
+            } else {
+                result.operands.first = computeLowerOrUpperBoundsTotalReward<VT, true>(result.transitions, result.offsets.first, result.exitChoices,
+                                                                                       result.exitProbabilities.value(), optionalDir);
+                result.operands.second = computeLowerOrUpperBoundsTotalReward<VT, false>(result.transitions, result.offsets.second, result.exitChoices,
+                                                                                         result.exitProbabilities.value(), optionalDir);
+            }
+        } else {
+            if constexpr (SingleValue) {
+                result.operands = std::vector<VT>(result.transitions.getRowGroupCount(), storm::utility::zero<VT>());
+            } else {
+                result.operands = {std::vector<VT>(result.transitions.getRowGroupCount(), storm::utility::zero<VT>()),
+                                   std::vector<VT>(result.transitions.getRowGroupCount(), storm::utility::zero<VT>())};
+            }
+        }
+
         return result;
     }
 
     template<typename VT, bool SingleValue>
-    SubsystemData<VT, SingleValue> initializeSubsystemDataEliminateECs(storm::storage::BitVector const& subsystem) const {
-        auto original = initializeSubsystemData<VT, SingleValue>(subsystem);
+    SubsystemData<VT, SingleValue> eliminateECs(SubsystemData<VT, SingleValue>&& original) const {
         storm::storage::BitVector allStates(original.transitions.getRowGroupCount(), true);
         auto possibleECRows = ~original.exitChoices;
         storm::storage::MaximalEndComponentDecomposition<VT> ecs(original.transitions, original.transitions.transpose(true), allStates, possibleECRows);
         if (ecs.empty()) {
             // No ECs to eliminate
-            return original;
+            return std::move(original);
         }
         auto reductionRes = storm::transformer::EndComponentEliminator<VT>::transform(original.transitions, ecs, allStates, allStates, false);
         SubsystemData<VT, SingleValue> reduced{
-            std::move(reductionRes.matrix), std::move(reductionRes.sinkRows), {}, {}, std::move(reductionRes.oldToNewStateMapping)};
+            std::move(reductionRes.matrix), std::move(reductionRes.sinkRows), {}, {}, {}, std::move(reductionRes.oldToNewStateMapping)};
         if constexpr (SingleValue) {
             reduced.offsets.reserve(reduced.exitChoices.size());
-            reduced.operands.assign(reduced.transitions.getRowGroupCount(), storm::utility::zero<VT>());
         } else {
             reduced.offsets.first.reserve(reduced.exitChoices.size());
             reduced.offsets.second.reserve(reduced.exitChoices.size());
-            reduced.operands.first.assign(reduced.transitions.getRowGroupCount(), storm::utility::zero<VT>());  // lower bound for probabilities
-            reduced.operands.second.assign(reduced.transitions.getRowGroupCount(), storm::utility::one<VT>());  // upper bound for probabilities
+        }
+        if (original.exitProbabilities.has_value()) {
+            reduced.exitProbabilities.emplace();
+            reduced.exitProbabilities->reserve(reduced.exitChoices.size());
         }
         for (uint64_t newRow = 0; newRow < reduced.exitChoices.size(); ++newRow) {
             auto const oldRow = reductionRes.newToOldRowMapping[newRow];
+            if (original.exitProbabilities.has_value()) {
+                // Set exit probability to '1' for all sinkRows, i.e., those that correspond to staying in the EC forever
+                reduced.exitProbabilities->push_back(reduced.exitChoices.get(newRow) ? storm::utility::one<VT>() : original.exitProbabilities->at(oldRow));
+            }
             if (original.exitChoices.get(oldRow)) {
                 reduced.exitChoices.set(newRow, true);
             }
@@ -220,16 +302,9 @@ class LowerUpperValueCertificateComputer {
                 reduced.offsets.second.push_back(original.offsets.second[oldRow]);
             }
         }
-        for (uint64_t oldState = 0; oldState < reduced.originalToReducedStateMapping->size(); ++oldState) {
-            auto const newState = reduced.originalToReducedStateMapping->at(oldState);
-            STORM_LOG_ASSERT(newState < reduced.transitions.getRowGroupCount(), "No representative for some state found in the reduced subsystem.");
-            if constexpr (SingleValue) {
-                reduced.operands[newState] = std::max(reduced.operands[newState], original.operands[oldState]);
-            } else {
-                reduced.operands.first[newState] = std::max(reduced.operands.first[newState], original.operands.first[oldState]);     // maximal lower bound
-                reduced.operands.second[newState] = std::min(reduced.operands.second[newState], original.operands.second[oldState]);  // minimal upper bound
-            }
-        }
+        STORM_LOG_ASSERT(std::all_of(reduced.originalToReducedStateMapping->begin(), reduced.originalToReducedStateMapping->end(),
+                                     [&reduced](auto const& i) { return i < reduced.transitions.getRowGroupCount(); }),
+                         "No representative for some state found in the reduced subsystem.");
         return reduced;
     }
 
@@ -313,8 +388,7 @@ class LowerUpperValueCertificateComputer {
     void computeForSubsystemFpII(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, double, ValueType>;  // VT is imprecise
         std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
-        bool constexpr canHaveECs = optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize;
-        auto subsystemData = canHaveECs ? initializeSubsystemDataEliminateECs<VT, false>(subsystemStates) : initializeSubsystemData<VT, false>(subsystemStates);
+        auto subsystemData = initializeSubsystemData<VT, false>(subsystemStates, true);
 
         auto viOp = std::make_shared<storm::solver::helper::ValueIterationOperator<VT, !Nondeterministic>>();
         viOp->setMatrixBackwards(subsystemData.transitions);
@@ -335,7 +409,7 @@ class LowerUpperValueCertificateComputer {
     void computeForSubsystemExPI(storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, ValueType, storm::RationalNumber>;  // VT is exact
 
-        auto subsystemData = initializeSubsystemDataEliminateECs<VT, true>(subsystemStates);
+        auto subsystemData = initializeSubsystemData<VT, true>(subsystemStates, false);
 
         storm::Environment env;
         env.solver().minMax().setMethod(storm::solver::MinMaxMethod::ViToPi);
@@ -444,11 +518,10 @@ class LowerUpperValueCertificateComputer {
     }
 
     storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix;
-    storm::storage::BitVector const& terminalStates;
-    storm::storage::BitVector const& prob1States;
+    TotalRewardSpecification<ValueType> const& totalRewardSpecification;
     // lower/upper values for each state. If the computation is exact, upper values are not used and remain empty.
     std::vector<ValueType> globalLowerValues, globalUpperValues;
-};
+};  // namespace storm::modelchecker
 
 template<typename ValueType>
 storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
@@ -473,12 +546,11 @@ storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<V
 }
 
 template<typename ValueType, storm::OptimizationDirection Dir>
-std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType> computeLowerBoundRanking(
-    storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
-    storm::storage::BitVector const& targetStates, storm::OptionalRef<storm::storage::BitVector const> constraintStates,
-    std::optional<storm::storage::BitVector> const& choiceConstraint = std::nullopt) {
-    using RankingType = typename ReachabilityProbabilityCertificate<ValueType>::RankingType;
-    RankingType const InfRank = ReachabilityProbabilityCertificate<ValueType>::InfRank;
+std::vector<RankingType> computeLowerBoundRanking(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                  storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
+                                                  storm::storage::BitVector const& targetStates,
+                                                  storm::OptionalRef<storm::storage::BitVector const> constraintStates,
+                                                  std::optional<storm::storage::BitVector> const& choiceConstraint = std::nullopt) {
     auto const& rowGroupIndices = transitionProbabilityMatrix.getRowGroupIndices();
 
     std::vector<RankingType> ranks(targetStates.size(), InfRank);
@@ -525,24 +597,23 @@ std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType>
 }
 
 template<typename ValueType>
-struct CertificateData {
+struct ProbabilityCertificateData {
     std::vector<ValueType> lowerValues, upperValues;
-    std::vector<typename ReachabilityProbabilityCertificate<ValueType>::RankingType> ranks;
+    std::vector<RankingType> ranks;
 };
 
 template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir = storm::OptimizationDirection::Minimize>
-CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env,
-                                                                         storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                                         storm::storage::BitVector const& targetStates,
-                                                                         storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
+ProbabilityCertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env,
+                                                                                    storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                                                    storm::storage::BitVector const& targetStates,
+                                                                                    storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
     std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
     utility::BackwardTransitionCache<ValueType> backwardTransitionCache(transitionProbabilityMatrix);
     auto toRewardData = ReachabilityProbabilityToRewardTransformer<ValueType>(transitionProbabilityMatrix, backwardTransitionCache)
                             .transform(optionalDir, targetStates, constraintStates);
     STORM_LOG_ASSERT(toRewardData.terminalStateValues.size() == 1 && toRewardData.terminalStateValues.front().first.isOne(),
                      "Expected exactly one terminal state value with value 1.");
-    LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData.terminalStates,
-                                                                                  toRewardData.terminalStateValues.front().second);
+    LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData);
 
     auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
@@ -556,11 +627,12 @@ CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::
 }
 
 template<typename ValueType>
-CertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
-                                                                         storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                                         storm::storage::BitVector const& targetStates,
-                                                                         storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
-    CertificateData<ValueType> data;
+ProbabilityCertificateData<ValueType> computeReachabilityProbabilityCertificateData(storm::Environment const& env,
+                                                                                    std::optional<storm::OptimizationDirection> dir,
+                                                                                    storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                                                    storm::storage::BitVector const& targetStates,
+                                                                                    storm::OptionalRef<storm::storage::BitVector const> constraintStates) {
+    ProbabilityCertificateData<ValueType> data;
     if (dir.has_value()) {
         if (storm::solver::maximize(*dir)) {
             data = computeReachabilityProbabilityCertificateData<ValueType, true, storm::OptimizationDirection::Maximize>(env, transitionProbabilityMatrix,
@@ -580,7 +652,7 @@ std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabili
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
     storm::storage::BitVector targetStates, std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel,
     std::optional<std::string> constraintLabel) {
-    CertificateData<ValueType> data;
+    ProbabilityCertificateData<ValueType> data;
     std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> result;
     if (constraintStates.has_value()) {
         data = computeReachabilityProbabilityCertificateData<ValueType>(env, dir, transitionProbabilityMatrix, targetStates, constraintStates.value());
@@ -595,6 +667,60 @@ std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabili
     return result;
 }
 
+template<typename ValueType>
+struct RewardCertificateData {
+    std::vector<ValueType> lowerValues, upperValues;
+    std::vector<RankingType> lowerRanks, upperRanks;
+};
+
+template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir = storm::OptimizationDirection::Minimize>
+RewardCertificateData<ValueType> computeReachabilityRewardCertificateData(storm::Environment const& env,
+                                                                          storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                                          storm::storage::BitVector const& targetStates,
+                                                                          std::vector<ValueType> const& stateActionRewardVector) {
+    std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
+    utility::BackwardTransitionCache<ValueType> backwardTransitionCache(transitionProbabilityMatrix);
+    auto toRewardData = ReachabilityRewardTransformer<ValueType>(transitionProbabilityMatrix, backwardTransitionCache)
+                            .transform(optionalDir, targetStates, stateActionRewardVector);
+    STORM_LOG_ASSERT(toRewardData.terminalStateValues.size() == 1 && toRewardData.terminalStateValues.front().first.isPositiveInfinity(),
+                     "Expected exactly one terminal state value with value +infinity.");
+    LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData);
+
+    auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
+                                                       storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
+    std::optional<storm::storage::BitVector> inductiveChoices;
+    if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize) {
+        inductiveChoices = computeInductiveChoices<ValueType>(transitionProbabilityMatrix, lowerValues);
+    }
+    // TODO: ranks!
+    auto ranks =
+        computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, targetStates, inductiveChoices);
+    return {std::move(lowerValues), std::move(upperValues), ranks, ranks};
+}
+
+template<typename ValueType>
+std::unique_ptr<ReachabilityRewardCertificate<ValueType>> computeReachabilityRewardCertificate(
+    storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+    storm::storage::BitVector targetStates, std::vector<ValueType> stateActionRewardVector, std::string targetLabel, std::string rewardModelName) {
+    RewardCertificateData<ValueType> data;
+    if (dir.has_value()) {
+        if (storm::solver::maximize(*dir)) {
+            data = computeReachabilityRewardCertificateData<ValueType, true, storm::OptimizationDirection::Maximize>(env, transitionProbabilityMatrix,
+                                                                                                                     targetStates, stateActionRewardVector);
+        } else {
+            data = computeReachabilityRewardCertificateData<ValueType, true, storm::OptimizationDirection::Minimize>(env, transitionProbabilityMatrix,
+                                                                                                                     targetStates, stateActionRewardVector);
+        }
+    } else {
+        data = computeReachabilityRewardCertificateData<ValueType, false>(env, transitionProbabilityMatrix, targetStates, stateActionRewardVector);
+    }
+    auto result = std::make_unique<ReachabilityRewardCertificate<ValueType>>(dir, std::move(targetStates), std::move(stateActionRewardVector),
+                                                                             std::move(targetLabel), std::move(rewardModelName));
+    result->setLowerBoundsCertificate(std::move(data.lowerValues), std::move(data.lowerRanks));
+    result->setUpperBoundsCertificate(std::move(data.upperValues), std::move(data.upperRanks));
+    return result;
+}
+
 template std::unique_ptr<ReachabilityProbabilityCertificate<double>> computeReachabilityProbabilityCertificate<double>(
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<double> const& transitionProbabilityMatrix,
     storm::storage::BitVector targetStates, std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel,
@@ -603,5 +729,14 @@ template std::unique_ptr<ReachabilityProbabilityCertificate<storm::RationalNumbe
     storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
     storm::storage::SparseMatrix<storm::RationalNumber> const& transitionProbabilityMatrix, storm::storage::BitVector targetStates,
     std::optional<storm::storage::BitVector> constraintStates, std::string targetLabel, std::optional<std::string> constraintLabel);
+
+template std::unique_ptr<ReachabilityRewardCertificate<double>> computeReachabilityRewardCertificate<double>(
+    storm::Environment const& env, std::optional<storm::OptimizationDirection> dir, storm::storage::SparseMatrix<double> const& transitionProbabilityMatrix,
+    storm::storage::BitVector targetStates, std::vector<double> stateActionRewardVector, std::string targetLabel, std::string rewardModelName);
+
+template std::unique_ptr<ReachabilityRewardCertificate<storm::RationalNumber>> computeReachabilityRewardCertificate<storm::RationalNumber>(
+    storm::Environment const& env, std::optional<storm::OptimizationDirection> dir,
+    storm::storage::SparseMatrix<storm::RationalNumber> const& transitionProbabilityMatrix, storm::storage::BitVector targetStates,
+    std::vector<storm::RationalNumber> stateActionRewardVector, std::string targetLabel, std::string rewardModelName);
 
 }  // namespace storm::modelchecker
