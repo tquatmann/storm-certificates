@@ -278,7 +278,9 @@ std::unique_ptr<CheckResult> SparseCtmcCslModelChecker<SparseCtmcModelType>::com
         } else {
             auto probabilisticTransitions = this->getModel().computeProbabilityMatrix();
             auto weights = this->getModel().getExitRateVector();
-            std::transform(weights.begin(), weights.end(), weights.begin(), [](auto const& rate) { return storm::utility::one<ValueType>() / rate; });
+            std::transform(weights.begin(), weights.end(), weights.begin(),
+                           [](auto const& rate) -> ValueType { return storm::utility::one<ValueType>() / rate; });
+
             auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(env, std::nullopt, std::move(probabilisticTransitions),
                                                                                          subResult.getTruthValuesVector(), std::move(weights),
                                                                                          eventuallyFormula.getSubformula().toString(), "time");

@@ -72,10 +72,12 @@ class LowerUpperValueCertificateComputer {
         auto const& certSettings = storm::settings::getModule<storm::settings::modules::CertificationSettings>();
         auto alg = getAlgorithm();
         initializeValueVectors(alg);
-        if (certSettings.isUseTopologicalSet()) {
-            computeTopological(alg, relative, precision, ~totalRewardSpecification.terminalStates);
-        } else {
-            computeForSubsystem(alg, relative, precision, ~totalRewardSpecification.terminalStates);
+        if (!totalRewardSpecification.terminalStates.full()) {
+            if (certSettings.isUseTopologicalSet()) {
+                computeTopological(alg, relative, precision, ~totalRewardSpecification.terminalStates);
+            } else {
+                computeForSubsystem(alg, relative, precision, ~totalRewardSpecification.terminalStates);
+            }
         }
         if (globalUpperValues.empty()) {
             // Exact methods do not populate the upper values.
@@ -348,8 +350,10 @@ class LowerUpperValueCertificateComputer {
         storm::utility::Extremum<Dir, ValueType> lowerValue, upperValue;
         bool const computeUpperValues = !globalUpperValues.empty();
         for (auto const rowIndex : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            auto lowerRowValue = storm::utility::zero<ValueType>();
-            auto upperRowValue = storm::utility::zero<ValueType>();
+            auto const reward = totalRewardSpecification.actionRewards.has_value() ? totalRewardSpecification.actionRewards.value()[rowIndex]
+                                                                                   : storm::utility::zero<ValueType>();
+            auto lowerRowValue = reward;
+            auto upperRowValue = reward;
             std::optional<ValueType> diagonalEntry;
             for (auto const& entry : transitionProbabilityMatrix.getRow(rowIndex)) {
                 if (state == entry.getColumn()) {
@@ -523,16 +527,20 @@ class LowerUpperValueCertificateComputer {
     std::vector<ValueType> globalLowerValues, globalUpperValues;
 };  // namespace storm::modelchecker
 
-template<typename ValueType>
+template<typename ValueType, storm::OptimizationDirection Dir>
 storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                  std::vector<ValueType> const& valueVector) {
+                                                  std::vector<ValueType> const& valueVector,
+                                                  storm::OptionalRef<std::vector<ValueType> const> rewardVector = {}) {
     storm::storage::BitVector inductiveChoices(transitionProbabilityMatrix.getRowCount(), false);
     bool warnIfEmpty = true;
     for (uint64_t state = 0; state < transitionProbabilityMatrix.getColumnCount(); ++state) {
         bool stateHasInductiveChoice = false;
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
             ValueType choiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, valueVector);
-            if (choiceValue >= valueVector[state]) {
+            if (rewardVector) {
+                choiceValue += rewardVector->at(choice);
+            }
+            if (storm::solver::maximize(Dir) ? choiceValue >= valueVector[state] : choiceValue <= valueVector[state]) {
                 inductiveChoices.set(choice);
                 stateHasInductiveChoice = true;
             }
@@ -546,11 +554,11 @@ storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<V
 }
 
 template<typename ValueType, storm::OptimizationDirection Dir>
-std::vector<RankingType> computeLowerBoundRanking(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                  storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
-                                                  storm::storage::BitVector const& targetStates,
-                                                  storm::OptionalRef<storm::storage::BitVector const> constraintStates,
-                                                  std::optional<storm::storage::BitVector> const& choiceConstraint = std::nullopt) {
+std::vector<RankingType> computeDistanceRanking(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
+                                                storm::storage::BitVector const& targetStates,
+                                                storm::OptionalRef<storm::storage::BitVector const> constraintStates,
+                                                std::optional<storm::storage::BitVector> const& choiceConstraint = std::nullopt) {
     auto const& rowGroupIndices = transitionProbabilityMatrix.getRowGroupIndices();
 
     std::vector<RankingType> ranks(targetStates.size(), InfRank);
@@ -567,7 +575,7 @@ std::vector<RankingType> computeLowerBoundRanking(storm::storage::SparseMatrix<V
             if (constraintStates.has_value() && !constraintStates->get(preState)) {
                 continue;
             }
-            storm::utility::Extremum<storm::solver::invert(Dir), RankingType> newRankMinusOne;
+            storm::utility::Extremum<Dir, RankingType> newRankMinusOne;
             // Iterate over all (selected) choices of the pre-state
             uint64_t currentChoice = rowGroupIndices[preState];
             if (choiceConstraint.has_value()) {
@@ -596,6 +604,51 @@ std::vector<RankingType> computeLowerBoundRanking(storm::storage::SparseMatrix<V
     return ranks;
 }
 
+template<typename ValueType, storm::OptimizationDirection Dir>
+std::vector<RankingType> computeModifiedDistanceRanking(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
+                                                        storm::storage::SparseMatrix<ValueType> const& backwardTransitions,
+                                                        storm::storage::BitVector const& probLess1States) {
+    std::vector<RankingType> ranks(probLess1States.size(), InfRank);
+    storm::utility::vector::setVectorValues<RankingType>(ranks, probLess1States, 0);
+
+    // Apply the modified ranking operator until no more states are updated
+    while (true) {
+        bool updated = false;
+        for (auto state : probLess1States) {
+            storm::utility::Extremum<Dir, RankingType> newStateRank;
+            for (auto const currentChoice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
+                storm::utility::Minimum<RankingType> minSuccessorRank;
+                bool allSuccessorsEqual = true;
+                for (auto const& entry : transitionProbabilityMatrix.getRow(currentChoice)) {
+                    if (storm::utility::isZero(entry.getValue())) {
+                        continue;
+                    }
+                    if (!minSuccessorRank.empty() && ranks[entry.getColumn()] != *minSuccessorRank) {
+                        allSuccessorsEqual = false;
+                    }
+                    minSuccessorRank &= ranks[entry.getColumn()];
+                }
+                STORM_LOG_ASSERT(!minSuccessorRank.empty(),
+                                 "Ranking operator failed to compute rank for state " << state << " since the row " << currentChoice << " is empty.");
+                auto choiceRank = *minSuccessorRank;
+                if (choiceRank != InfRank && !allSuccessorsEqual) {
+                    ++choiceRank;
+                }
+                newStateRank &= choiceRank;
+            }
+            STORM_LOG_ASSERT(!newStateRank.empty(), "Failed to compute rank for state " << state << ".");
+            if (ranks[state] != *newStateRank) {
+                STORM_LOG_ASSERT(ranks[state] <= *newStateRank, "Ranking operator did not generate an increasing sequence for state " << state << ".");
+                ranks[state] = *newStateRank;
+                updated = true;
+            }
+        }
+        if (!updated) {
+            return ranks;
+        }
+    }
+}
+
 template<typename ValueType>
 struct ProbabilityCertificateData {
     std::vector<ValueType> lowerValues, upperValues;
@@ -619,10 +672,10 @@ ProbabilityCertificateData<ValueType> computeReachabilityProbabilityCertificateD
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
     std::optional<storm::storage::BitVector> inductiveChoices;
     if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize) {
-        inductiveChoices = computeInductiveChoices<ValueType>(transitionProbabilityMatrix, lowerValues);
+        inductiveChoices = computeInductiveChoices<ValueType, storm::OptimizationDirection::Maximize>(transitionProbabilityMatrix, lowerValues);
     }
-    auto ranks =
-        computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, constraintStates, inductiveChoices);
+    auto ranks = computeDistanceRanking<ValueType, storm::solver::invert(Dir)>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates,
+                                                                               constraintStates, inductiveChoices);
     return {std::move(lowerValues), std::move(upperValues), std::move(ranks)};
 }
 
@@ -684,18 +737,22 @@ RewardCertificateData<ValueType> computeReachabilityRewardCertificateData(storm:
                             .transform(optionalDir, targetStates, stateActionRewardVector);
     STORM_LOG_ASSERT(toRewardData.terminalStateValues.size() == 1 && toRewardData.terminalStateValues.front().first.isPositiveInfinity(),
                      "Expected exactly one terminal state value with value +infinity.");
+    auto const& infinityStates = toRewardData.terminalStateValues.front().second;
     LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData);
 
     auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
     std::optional<storm::storage::BitVector> inductiveChoices;
-    if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize) {
-        inductiveChoices = computeInductiveChoices<ValueType>(transitionProbabilityMatrix, lowerValues);
+    if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Minimize) {
+        inductiveChoices =
+            computeInductiveChoices<ValueType, storm::OptimizationDirection::Minimize>(transitionProbabilityMatrix, upperValues, stateActionRewardVector);
     }
-    // TODO: ranks!
-    auto ranks =
-        computeLowerBoundRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, targetStates, inductiveChoices);
-    return {std::move(lowerValues), std::move(upperValues), ranks, ranks};
+    auto upperRanks =
+        computeDistanceRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, storm::NullRef, inductiveChoices);
+    auto lowerRanks =
+        computeModifiedDistanceRanking<ValueType, storm::solver::invert(Dir)>(transitionProbabilityMatrix, backwardTransitionCache.get(), infinityStates);
+
+    return {std::move(lowerValues), std::move(upperValues), std::move(lowerRanks), std::move(upperRanks)};
 }
 
 template<typename ValueType>

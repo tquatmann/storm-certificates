@@ -13,6 +13,7 @@
 #include "storm/utility/NumberTraits.h"
 #include "storm/utility/OptionalRef.h"
 #include "storm/utility/macros.h"
+#include "storm/utility/vector.h"
 
 #include "storm/exceptions/InvalidOperationException.h"
 
@@ -54,28 +55,32 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
                                 std::vector<ValueType> const& stateActionRewardVector, std::vector<ValueType> const& values,
                                 std::vector<RankingType> const& ranks) {
     for (uint64_t state = 0; state < targetStates.size(); ++state) {
-        if (targetStates.get(state)) {
-            // Handle target state
-            if (values[state] >= storm::utility::zero<ValueType>()) {
-                STORM_LOG_WARN("Certificate invalid because target state " << state << " has negative upper bound " << values[state]);
-                return false;
-            }
-            continue;
-        }
         // Handle states that do not almost surely reach target
-        if (ranks[state] == InfRank && !storm::utility::isInfinity(values[state])) {
+        if (!storm::utility::isInfinity(values[state]) && ranks[state] == InfRank) {
             STORM_LOG_WARN("Certificate invalid because state " << state << " has infinite rank but finite value " << values[state] << ".");
             return false;
         }
+        if (targetStates.get(state)) {
+            // Handle target state
+            if (values[state] < storm::utility::zero<ValueType>()) {
+                STORM_LOG_WARN("Certificate invalid because target state " << state << " has negative upper bound " << values[state]);
+                return false;
+            }
+            // The rank of a target state must be non-negative, too.
+            // However, a negative rank (which is an unsigned integer) is not possible, anyway.
+            // So, we skip checking for the rank
+            continue;
+        }
+
         // Apply Bellman and Distance operator for non-target states
         storm::utility::Extremum<Dir, ValueType> stateValue;
         storm::utility::Extremum<Dir, RankingType> stateRankMinusOne;
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            auto const currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
+            ValueType const currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
             stateValue &= currentChoiceValue;
-            // Compute rank for this choice if we're minimizing or if the choice is inductive
+            // Compute rank for this choice if we're maximizing or if the choice is inductive
             if (storm::solver::maximize(Dir) || currentChoiceValue <= values[state]) {
-                storm::utility::Maximum<RankingType> choiceRank;
+                storm::utility::Minimum<RankingType> choiceRank;
                 for (auto const& entry : transitionProbabilityMatrix.getRow(choice)) {
                     if (storm::utility::isZero(entry.getValue())) {
                         continue;
@@ -96,8 +101,8 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
             return false;
         }
         if (stateRankMinusOne.empty()) {
-            STORM_LOG_WARN("Certificate invalid because there is no valid (i.e. inductive) action at state " << state << ", where the certificate has rank "
-                                                                                                             << ranks[state] << ".");
+            STORM_LOG_WARN("Certificate invalid because there is no valid (i.e. decreasing) action at state " << state << ", where the certificate has rank "
+                                                                                                              << ranks[state] << ".");
             return false;
         }
         RankingType const stateRank = *stateRankMinusOne == InfRank ? InfRank : *stateRankMinusOne + 1;  // avoid integer overflow!
@@ -114,9 +119,6 @@ template<typename ValueType, OptimizationDirection Dir>
 bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::BitVector const& targetStates,
                                 std::vector<ValueType> const& stateActionRewardVector, std::vector<ValueType> const& values,
                                 std::vector<RankingType> const& ranks) {
-    auto ranks1 = ranks;
-    auto ranks2 = ranks;
-    // TODO: Implement the checkLowerBoundCertificate function
     for (uint64_t state = 0; state < targetStates.size(); ++state) {
         // Handle target state
         if (targetStates.get(state)) {
@@ -124,36 +126,36 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
                 STORM_LOG_WARN("Certificate invalid because target state " << state << " has non-zero lower bound " << values[state] << ".");
                 return false;
             }
-            if (ranks1[state] != 0) {
-                STORM_LOG_WARN("Certificate invalid because target state " << state << " has non-zero rank1 " << ranks1[state] << ".");
+            if (ranks[state] != InfRank) {
+                STORM_LOG_WARN("Certificate invalid because target state " << state << " has finite rank" << ranks[state] << ".");
                 return false;
             }
             continue;
         }
-        // Apply ranking- and Bellman operators for non-target stats
+        if (storm::utility::isInfinity(values[state]) && ranks[state] == InfRank) {
+            STORM_LOG_WARN("Certificate invalid because state " << state << " has infinite rank and value.");
+            return false;
+        }
+        // Apply ranking- and Bellman operators for non-target states
         storm::utility::Extremum<Dir, ValueType> stateValue;
-        storm::utility::Extremum<Dir, RankingType> stateRank1MinusOne;
-        storm::utility::Extremum<storm::solver::invert(Dir), RankingType> stateRank2MinusOne;
+        storm::utility::Extremum<storm::solver::invert(Dir), RankingType> stateRankMinusOne;
 
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            auto currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
+            ValueType const currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
             stateValue &= currentChoiceValue;
-            // Compute rank for this choice if we're minimizing or if the choice is inductive
-            storm::utility::Minimum<RankingType> choiceRank1, choiceRank2;
+            // Compute rank for this choice
+            storm::utility::Minimum<RankingType> choiceRank;
             for (auto const& entry : transitionProbabilityMatrix.getRow(choice)) {
                 if (storm::utility::isZero(entry.getValue())) {
                     continue;
                 }
-                choiceRank1 &= ranks1[entry.getColumn()];
-                choiceRank2 &= ranks2[entry.getColumn()];
+                choiceRank &= ranks[entry.getColumn()];
             }
-            STORM_LOG_ASSERT(!choiceRank1.empty() && !choiceRank2.empty(),
-                             "Ranking operator failed to compute rank for state " << state << " since the row " << choice << " is empty.");
-            stateRank1MinusOne &= *choiceRank1;
-            stateRank2MinusOne &= *choiceRank2;
+            STORM_LOG_ASSERT(!choiceRank.empty(), "Ranking operator failed to compute rank for state " << state << " since the row " << choice << " is empty.");
+            stateRankMinusOne &= *choiceRank;
         }
 
-        STORM_LOG_ASSERT(!stateValue.empty() && !stateRank1MinusOne.empty() && !stateRank2MinusOne.empty(),
+        STORM_LOG_ASSERT(!stateValue.empty() && !stateRankMinusOne.empty(),
                          "Failed to compute values and/or ranks for state " << state << " since the row group is empty.");
         if (*stateValue < values[state]) {
             double const approxDiff = storm::utility::convertNumber<double, ValueType>(values[state] - *stateValue);
@@ -162,16 +164,10 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
                                                                                                  << ". Approx. diff is " << approxDiff << ".");
             return false;
         }
-        RankingType const stateRank1 = *stateRank1MinusOne == InfRank ? InfRank : *stateRank1MinusOne + 1;  // avoid integer overflow!
-        if (stateRank1 < ranks1[state]) {
-            STORM_LOG_WARN("Certificate invalid because ranks1 for lower bound is not inductive. At state "
-                           << state << " the rank1 operator yields " << stateRank1 << " but the certificate has larger rank1 " << ranks1[state] << ".");
-            return false;
-        }
-        RankingType const stateRank2 = *stateRank2MinusOne == InfRank ? InfRank : *stateRank2MinusOne + 1;  // avoid integer overflow!
-        if (ranks1[state] != InfRank && stateRank2 > ranks2[state]) {
-            STORM_LOG_WARN("Certificate invalid because ranks2 for lower bound is not inductive. At state "
-                           << state << " the rank2 operator yields " << stateRank2 << " but the certificate has smaller rank2 " << ranks2[state] << ".");
+        RankingType const stateRank = *stateRankMinusOne == InfRank ? InfRank : *stateRankMinusOne + 1;  // avoid integer overflow!
+        if (stateRank > ranks[state]) {
+            STORM_LOG_WARN("Certificate invalid because ranks for lower bound is not inductive. At state "
+                           << state << " the rank operator yields " << stateRank << " but the certificate has smallr rank " << ranks[state] << ".");
             return false;
         }
     }
@@ -257,7 +253,7 @@ void ReachabilityRewardCertificate<ValueType>::exportToStream(std::ostream& out)
         }
         if (hasUpperBoundsCertificate()) {
             out << upperBoundsCertificate.values[i] << " ";
-            rankToStream(lowerBoundsCertificate.ranks[i]);
+            rankToStream(upperBoundsCertificate.ranks[i]);
         }
         out << "\n";
     }
@@ -275,7 +271,7 @@ std::string ReachabilityRewardCertificate<ValueType>::summaryString(storm::stora
                 hasUpperBoundsCertificate() ? upperBoundsCertificate.values[state] : storm::utility::infinity<ValueType>()};
     };
     auto const [lowerBound, upperBound] = getLowerUpperBound(relevantStates.getNextSetIndex(0));
-    ss << "Certified reachability probability: [" << lowerBound << ", " << upperBound << "]";
+    ss << "Certified reachability reward: [" << lowerBound << ", " << upperBound << "]";
     if (storm::NumberTraits<ValueType>::IsExact) {
         ss << " (approx. [" << storm::utility::convertNumber<double>(lowerBound) << ", " << storm::utility::convertNumber<double>(upperBound) << "])";
     }
