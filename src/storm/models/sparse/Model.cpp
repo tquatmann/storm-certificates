@@ -627,7 +627,7 @@ void writeCemToStream(std::ostream& outStream, storm::storage::SparseMatrix<Valu
             if (choiceRewards) {
                 outStream << " " << choiceRewards(state, localChoice) << "\n";
             } else {
-                outStream << " 0\n";
+                outStream << " 1\n";
             }
         }
     }
@@ -639,7 +639,7 @@ void Model<ValueType, RewardModelType>::writeCemToStream(std::ostream& outStream
         STORM_LOG_THROW(false, storm::exceptions::NotImplementedException, "CEM export not implemented for this model type.");
     } else {
         // First write some useful information to the file and potentially issue useful warnings
-        STORM_LOG_WARN_COND(this->getNumberOfStates() < 10000 && this->getNumberOfTransitions() < 100000,
+        STORM_LOG_WARN_COND(this->getNumberOfStates() < 1'000'000 && this->getNumberOfTransitions() < 10'000'000,
                             "Exporting a large model to CEM. This might take some time and will result in a very large file.");
         outStream << "# " << this->getType() << " model with " << this->getNumberOfStates() << " states and " << this->getNumberOfTransitions()
                   << " transitions obtained with Storm\n";
@@ -651,19 +651,51 @@ void Model<ValueType, RewardModelType>::writeCemToStream(std::ostream& outStream
         }
         if (!this->isDiscreteTimeModel()) {
             // We currently don't know how to represent exit rates, and it is unclear how action and state rewards are merged into a single number per choice
-            STORM_LOG_WARN("Exporting a continuous time model of type " << this->getType()
-                                                                        << " to CEM. The export will not contain exit rates and rewards are potentially off.");
-            outStream << "# WARN: continuous time model is exported without exit rate information and the rewards are potentially off\n";
+            STORM_LOG_WARN("Exporting a continuous time model of type " << this->getType() << " to CEM which only supports discrete time models.");
+            outStream
+                << "# WARN: continuous time model is exported without exit explicit rate information. The rewards are scaled with the reciprocal rates.\n";
         }
+        // Create a function that computes the rewards or expected time for a choice
         std::function<ValueType(uint64_t, uint64_t)> choiceRewards;
+        std::vector<ValueType> expectedResidenceTimes;
+        if (this->isOfType(ModelType::Ctmc)) {
+            auto const& ctmc = this->template as<storm::models::sparse::Ctmc<ValueType, RewardModelType>>();
+            for (uint64_t state = 0; state < ctmc->getNumberOfStates(); ++state) {
+                expectedResidenceTimes.push_back(storm::utility::one<ValueType>() / ctmc->getExitRateVector()[state]);
+            }
+        } else if (this->isOfType(ModelType::MarkovAutomaton)) {
+            auto const& ma = this->template as<storm::models::sparse::MarkovAutomaton<ValueType, RewardModelType>>();
+            for (uint64_t state = 0; state < ma->getNumberOfStates(); ++state) {
+                if (ma->isMarkovianState(state)) {
+                    expectedResidenceTimes.push_back(storm::utility::one<ValueType>() / ma->getExitRate(state));
+                } else {
+                    expectedResidenceTimes.push_back(storm::utility::zero<ValueType>());
+                }
+            }
+        }
         if (this->hasRewardModel()) {
             STORM_LOG_WARN_COND(this->hasUniqueRewardModel(), "The model considers multiple reward models. Only the first one (named \""
                                                                   << this->getRewardModels().begin()->first << "\") is exported to CEM.");
             outStream << "# Reward model \"" << this->getRewardModels().begin()->first << "\"\n";
-            choiceRewards = [this](uint64_t state, uint64_t localChoice) -> ValueType {
-                return this->getRewardModels().begin()->second.getTotalStateActionReward(
-                    state, this->getTransitionMatrix().getRowGroupIndices()[state] + localChoice, this->getTransitionMatrix());
-            };
+            if (expectedResidenceTimes.empty()) {
+                choiceRewards = [this](uint64_t state, uint64_t localChoice) -> ValueType {
+                    return this->getRewardModels().begin()->second.getTotalStateActionReward(
+                        state, this->getTransitionMatrix().getRowGroupIndices()[state] + localChoice, this->getTransitionMatrix());
+                };
+            } else {
+                choiceRewards = [this, &expectedResidenceTimes](uint64_t state, uint64_t localChoice) -> ValueType {
+                    return this->getRewardModels().begin()->second.getTotalStateActionReward(
+                        state, this->getTransitionMatrix().getRowGroupIndices()[state] + localChoice, this->getTransitionMatrix(),
+                        expectedResidenceTimes[state]);
+                };
+            }
+        } else {
+            outStream << "# Reward model \"time\"\n";
+            if (expectedResidenceTimes.empty()) {
+                choiceRewards = [](uint64_t, uint64_t) -> ValueType { return storm::utility::one<ValueType>(); };
+            } else {
+                choiceRewards = [&expectedResidenceTimes](uint64_t state, uint64_t) -> ValueType { return expectedResidenceTimes[state]; };
+            }
         }
 
         if (this->isOfType(ModelType::Ctmc)) {
