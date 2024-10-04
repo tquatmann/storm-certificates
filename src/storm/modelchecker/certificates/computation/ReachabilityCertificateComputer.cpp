@@ -527,20 +527,42 @@ class LowerUpperValueCertificateComputer {
     std::vector<ValueType> globalLowerValues, globalUpperValues;
 };  // namespace storm::modelchecker
 
-template<typename ValueType, storm::OptimizationDirection Dir>
+template<typename ValueType>
+storm::Extended<ValueType> multiplyRowWithVectorAddNumber(storm::storage::SparseMatrix<ValueType> const& matrix, uint64_t rowIndex,
+                                                          std::vector<storm::Extended<ValueType>> const& vector, ValueType const& offset) {
+    ValueType result{offset};
+    for (auto const& entry : matrix.getRow(rowIndex)) {
+        if (storm::utility::isZero(entry.getValue())) {
+            continue;
+        }
+        auto const& vi = vector[entry.getColumn()];
+        if (vi.isFinite()) {
+            result += vi.getValue() * entry.getValue();
+        } else {
+            return storm::Extended<ValueType>::posInfinity();
+        }
+    }
+    return result;
+}
+
+template<typename ValueType>
+ValueType multiplyRowWithVectorAddNumber(storm::storage::SparseMatrix<ValueType> const& matrix, uint64_t rowIndex, std::vector<ValueType> const& vector,
+                                         ValueType const& offset) {
+    return offset + matrix.multiplyRowWithVector(rowIndex, vector);
+}
+
+template<storm::OptimizationDirection Dir, typename ValueType, typename VectorValueType>
 storm::storage::BitVector computeInductiveChoices(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix,
-                                                  std::vector<ValueType> const& valueVector,
+                                                  std::vector<VectorValueType> const& valueVector,
                                                   storm::OptionalRef<std::vector<ValueType> const> rewardVector = {}) {
     storm::storage::BitVector inductiveChoices(transitionProbabilityMatrix.getRowCount(), false);
     bool warnIfEmpty = true;
     for (uint64_t state = 0; state < transitionProbabilityMatrix.getColumnCount(); ++state) {
         bool stateHasInductiveChoice = false;
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            ValueType choiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, valueVector);
-            if (rewardVector) {
-                choiceValue += rewardVector->at(choice);
-            }
-            if (storm::solver::maximize(Dir) ? choiceValue >= valueVector[state] : choiceValue <= valueVector[state]) {
+            VectorValueType const choiceValue = multiplyRowWithVectorAddNumber(
+                transitionProbabilityMatrix, choice, valueVector, rewardVector.has_value() ? rewardVector->at(choice) : storm::utility::zero<ValueType>());
+            if (storm::solver::maximize(Dir) ? valueVector[state] <= choiceValue : choiceValue <= valueVector[state]) {
                 inductiveChoices.set(choice);
                 stateHasInductiveChoice = true;
             }
@@ -672,7 +694,7 @@ ProbabilityCertificateData<ValueType> computeReachabilityProbabilityCertificateD
                                                        storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
     std::optional<storm::storage::BitVector> inductiveChoices;
     if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Maximize) {
-        inductiveChoices = computeInductiveChoices<ValueType, storm::OptimizationDirection::Maximize>(transitionProbabilityMatrix, lowerValues);
+        inductiveChoices = computeInductiveChoices<storm::OptimizationDirection::Maximize, ValueType>(transitionProbabilityMatrix, lowerValues);
     }
     auto ranks = computeDistanceRanking<ValueType, storm::solver::invert(Dir)>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates,
                                                                                constraintStates, inductiveChoices);
@@ -722,7 +744,7 @@ std::unique_ptr<ReachabilityProbabilityCertificate<ValueType>> computeReachabili
 
 template<typename ValueType>
 struct RewardCertificateData {
-    std::vector<ValueType> lowerValues, upperValues;
+    std::vector<storm::Extended<ValueType>> lowerValues, upperValues;
     std::vector<RankingType> lowerRanks, upperRanks;
 };
 
@@ -740,19 +762,34 @@ RewardCertificateData<ValueType> computeReachabilityRewardCertificateData(storm:
     auto const& infinityStates = toRewardData.terminalStateValues.front().second;
     LowerUpperValueCertificateComputer<ValueType, Nondeterministic, Dir> computer(transitionProbabilityMatrix, toRewardData);
 
-    auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
-                                                       storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
+    std::vector<storm::Extended<ValueType>> extendedLowerValues, extendedUpperValues;
+    {
+        auto [lowerValues, upperValues] = computer.compute(env.solver().minMax().getRelativeTerminationCriterion(),
+                                                           storm::utility::convertNumber<ValueType>(env.solver().minMax().getPrecision()));
+        extendedLowerValues.reserve(lowerValues.size());
+        extendedUpperValues.reserve(upperValues.size());
+        for (uint64_t i = 0; i < lowerValues.size(); ++i) {
+            if (infinityStates.get(i)) {
+                extendedLowerValues.push_back(storm::Extended<ValueType>::posInfinity());
+                extendedUpperValues.push_back(storm::Extended<ValueType>::posInfinity());
+            } else {
+                extendedLowerValues.emplace_back(std::move(lowerValues[i]));
+                extendedUpperValues.emplace_back(std::move(upperValues[i]));
+            }
+        }
+    }
+
     std::optional<storm::storage::BitVector> inductiveChoices;
     if (optionalDir.has_value() && optionalDir.value() == storm::OptimizationDirection::Minimize) {
-        inductiveChoices =
-            computeInductiveChoices<ValueType, storm::OptimizationDirection::Minimize>(transitionProbabilityMatrix, upperValues, stateActionRewardVector);
+        inductiveChoices = computeInductiveChoices<storm::OptimizationDirection::Minimize, ValueType>(transitionProbabilityMatrix, extendedUpperValues,
+                                                                                                      stateActionRewardVector);
     }
     auto upperRanks =
         computeDistanceRanking<ValueType, Dir>(transitionProbabilityMatrix, backwardTransitionCache.get(), targetStates, storm::NullRef, inductiveChoices);
     auto lowerRanks =
         computeModifiedDistanceRanking<ValueType, storm::solver::invert(Dir)>(transitionProbabilityMatrix, backwardTransitionCache.get(), infinityStates);
 
-    return {std::move(lowerValues), std::move(upperValues), std::move(lowerRanks), std::move(upperRanks)};
+    return {std::move(extendedLowerValues), std::move(extendedUpperValues), std::move(lowerRanks), std::move(upperRanks)};
 }
 
 template<typename ValueType>

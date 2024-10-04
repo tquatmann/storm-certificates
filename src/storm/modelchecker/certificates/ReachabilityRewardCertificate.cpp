@@ -50,13 +50,35 @@ bool ReachabilityRewardCertificate<ValueType>::checkValidity(storm::models::Mode
     return false;
 }
 
+template<typename ValueType>
+storm::Extended<ValueType> multiplyRowWithVectorAddNumber(storm::storage::SparseMatrix<ValueType> const& matrix, uint64_t rowIndex,
+                                                          std::vector<storm::Extended<ValueType>> const& vector, ValueType const& offset) {
+    ValueType result{offset};
+    for (auto const& entry : matrix.getRow(rowIndex)) {
+        if (storm::utility::isZero(entry.getValue())) {
+            continue;
+        }
+        auto const& vi = vector[entry.getColumn()];
+        if (vi.isFinite()) {
+            result += vi.getValue() * entry.getValue();
+        } else {
+            return storm::Extended<ValueType>::posInfinity();
+        }
+    }
+    return result;
+}
+
 template<typename ValueType, OptimizationDirection Dir>
 bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::BitVector const& targetStates,
-                                std::vector<ValueType> const& stateActionRewardVector, std::vector<ValueType> const& values,
+                                std::vector<ValueType> const& stateActionRewardVector, std::vector<storm::Extended<ValueType>> const& values,
                                 std::vector<RankingType> const& ranks) {
     for (uint64_t state = 0; state < targetStates.size(); ++state) {
+        if (values[state].isNegativeInfinity()) {
+            STORM_LOG_WARN("Certificate invalid because state " << state << " has negative infinity as value.");
+            return false;
+        }
         // Handle states that do not almost surely reach target
-        if (!storm::utility::isInfinity(values[state]) && ranks[state] == InfRank) {
+        if (values[state].isFinite() && ranks[state] == InfRank) {
             STORM_LOG_WARN("Certificate invalid because state " << state << " has infinite rank but finite value " << values[state] << ".");
             return false;
         }
@@ -73,11 +95,11 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
         }
 
         // Apply Bellman and Distance operator for non-target states
-        storm::utility::Extremum<Dir, ValueType> stateValue;
+        auto stateValue = storm::solver::maximize(Dir) ? storm::Extended<ValueType>::negInfinity() : storm::Extended<ValueType>::posInfinity();
         storm::utility::Extremum<Dir, RankingType> stateRankMinusOne;
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            ValueType const currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
-            stateValue &= currentChoiceValue;
+            auto const currentChoiceValue = multiplyRowWithVectorAddNumber(transitionProbabilityMatrix, choice, values, stateActionRewardVector[choice]);
+            stateValue = stateValue.template optimum<Dir>(currentChoiceValue);
             // Compute rank for this choice if we're maximizing or if the choice is inductive
             if (storm::solver::maximize(Dir) || currentChoiceValue <= values[state]) {
                 storm::utility::Minimum<RankingType> choiceRank;
@@ -92,10 +114,9 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
                 stateRankMinusOne &= *choiceRank;
             }
         }
-        STORM_LOG_ASSERT(!stateValue.empty(), "Bellman operator failed to compute value for state " << state << " since the row group is empty.");
-        if (*stateValue > values[state]) {
-            double const approxDiff = storm::utility::convertNumber<double, ValueType>(*stateValue - values[state]);
-            STORM_LOG_WARN("Certificate invalid because upper bound is not inductive. At state " << state << " the Bellman operator yields " << *stateValue
+        if (values[state] < stateValue) {
+            double const approxDiff = (stateValue - values[state]).asDouble();
+            STORM_LOG_WARN("Certificate invalid because upper bound is not inductive. At state " << state << " the Bellman operator yields " << stateValue
                                                                                                  << " but the certificate has smaller value " << values[state]
                                                                                                  << ". Approx. diff is " << approxDiff << ".");
             return false;
@@ -117,12 +138,12 @@ bool checkUpperBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
 
 template<typename ValueType, OptimizationDirection Dir>
 bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& transitionProbabilityMatrix, storm::storage::BitVector const& targetStates,
-                                std::vector<ValueType> const& stateActionRewardVector, std::vector<ValueType> const& values,
+                                std::vector<ValueType> const& stateActionRewardVector, std::vector<storm::Extended<ValueType>> const& values,
                                 std::vector<RankingType> const& ranks) {
     for (uint64_t state = 0; state < targetStates.size(); ++state) {
         // Handle target state
         if (targetStates.get(state)) {
-            if (!storm::utility::isZero(values[state])) {
+            if (!values[state].isFinite() || !storm::utility::isZero(values[state].getValue())) {
                 STORM_LOG_WARN("Certificate invalid because target state " << state << " has non-zero lower bound " << values[state] << ".");
                 return false;
             }
@@ -132,42 +153,49 @@ bool checkLowerBoundCertificate(storm::storage::SparseMatrix<ValueType> const& t
             }
             continue;
         }
-        if (storm::utility::isInfinity(values[state]) && ranks[state] == InfRank) {
+        if (values[state].isPositiveInfinity() && ranks[state] == InfRank) {
             STORM_LOG_WARN("Certificate invalid because state " << state << " has infinite rank and value.");
             return false;
         }
         // Apply ranking- and Bellman operators for non-target states
-        storm::utility::Extremum<Dir, ValueType> stateValue;
-        storm::utility::Extremum<storm::solver::invert(Dir), RankingType> stateRankMinusOne;
+        auto stateValue = storm::solver::maximize(Dir) ? storm::Extended<ValueType>::negInfinity() : storm::Extended<ValueType>::posInfinity();
+        storm::utility::Extremum<storm::solver::invert(Dir), RankingType> stateRank;
 
         for (auto choice : transitionProbabilityMatrix.getRowGroupIndices(state)) {
-            ValueType const currentChoiceValue = transitionProbabilityMatrix.multiplyRowWithVector(choice, values) + stateActionRewardVector[choice];
-            stateValue &= currentChoiceValue;
+            auto const currentChoiceValue = multiplyRowWithVectorAddNumber(transitionProbabilityMatrix, choice, values, stateActionRewardVector[choice]);
+            stateValue = stateValue.template optimum<Dir>(currentChoiceValue);
             // Compute rank for this choice
-            storm::utility::Minimum<RankingType> choiceRank;
+            storm::utility::Minimum<RankingType> minSuccessorRank;
+            bool allSuccessorsEqual = true;
             for (auto const& entry : transitionProbabilityMatrix.getRow(choice)) {
                 if (storm::utility::isZero(entry.getValue())) {
                     continue;
                 }
-                choiceRank &= ranks[entry.getColumn()];
+                if (!minSuccessorRank.empty() && ranks[entry.getColumn()] != *minSuccessorRank) {
+                    allSuccessorsEqual = false;
+                }
+                minSuccessorRank &= ranks[entry.getColumn()];
             }
-            STORM_LOG_ASSERT(!choiceRank.empty(), "Ranking operator failed to compute rank for state " << state << " since the row " << choice << " is empty.");
-            stateRankMinusOne &= *choiceRank;
+            STORM_LOG_ASSERT(!minSuccessorRank.empty(),
+                             "Ranking operator failed to compute rank for state " << state << " since the row " << choice << " is empty.");
+            auto choiceRank = *minSuccessorRank;
+            if (choiceRank != InfRank && !allSuccessorsEqual) {
+                ++choiceRank;
+            }
+            stateRank &= choiceRank;
         }
 
-        STORM_LOG_ASSERT(!stateValue.empty() && !stateRankMinusOne.empty(),
-                         "Failed to compute values and/or ranks for state " << state << " since the row group is empty.");
-        if (*stateValue < values[state]) {
-            double const approxDiff = storm::utility::convertNumber<double, ValueType>(values[state] - *stateValue);
-            STORM_LOG_WARN("Certificate invalid because lower bound is not inductive. At state " << state << " the Bellman operator yields " << *stateValue
+        if (stateValue < values[state]) {
+            double const approxDiff = (values[state] - stateValue).asDouble();
+            STORM_LOG_WARN("Certificate invalid because lower bound is not inductive. At state " << state << " the Bellman operator yields " << stateValue
                                                                                                  << " but the certificate has larger value " << values[state]
                                                                                                  << ". Approx. diff is " << approxDiff << ".");
             return false;
         }
-        RankingType const stateRank = *stateRankMinusOne == InfRank ? InfRank : *stateRankMinusOne + 1;  // avoid integer overflow!
-        if (stateRank > ranks[state]) {
+        STORM_LOG_ASSERT(!stateRank.empty(), "Failed to compute ranks for state " << state << " since the row group is empty.");
+        if (*stateRank > ranks[state]) {
             STORM_LOG_WARN("Certificate invalid because ranks for lower bound is not inductive. At state "
-                           << state << " the rank operator yields " << stateRank << " but the certificate has smallr rank " << ranks[state] << ".");
+                           << state << " the rank operator yields " << *stateRank << " but the certificate has smaller rank " << ranks[state] << ".");
             return false;
         }
     }
@@ -266,42 +294,46 @@ std::string ReachabilityRewardCertificate<ValueType>::summaryString(storm::stora
     STORM_LOG_THROW(numStates > 0, storm::exceptions::InvalidOperationException,
                     "Tried to summarize reachability reward certificate but no state is relevant.");
 
-    auto getLowerUpperBound = [this](uint64_t state) -> std::pair<ValueType, ValueType> {
-        return {hasLowerBoundsCertificate() ? lowerBoundsCertificate.values[state] : storm::utility::zero<ValueType>(),
-                hasUpperBoundsCertificate() ? upperBoundsCertificate.values[state] : storm::utility::infinity<ValueType>()};
+    auto getLowerUpperBound = [this](uint64_t state) -> std::pair<ExtendedValueType, ExtendedValueType> {
+        return {hasLowerBoundsCertificate() ? lowerBoundsCertificate.values[state] : ExtendedValueType::negInfinity(),
+                hasUpperBoundsCertificate() ? upperBoundsCertificate.values[state] : ExtendedValueType::posInfinity()};
     };
     auto const [lowerBound, upperBound] = getLowerUpperBound(relevantStates.getNextSetIndex(0));
     ss << "Certified reachability reward: [" << lowerBound << ", " << upperBound << "]";
     if (storm::NumberTraits<ValueType>::IsExact) {
-        ss << " (approx. [" << storm::utility::convertNumber<double>(lowerBound) << ", " << storm::utility::convertNumber<double>(upperBound) << "])";
+        ss << " (approx. [" << lowerBound.asDouble() << ", " << upperBound.asDouble() << "])";
     }
     if (numStates > 1) {
         ss << " (only showing first of " << numStates << " relevant states)";
     }
-    storm::utility::Maximum<ValueType> maxAbsDiff, maxRelDiff;
+    ExtendedValueType const zero(storm::utility::zero<ValueType>());
+    ExtendedValueType maxAbsDiff(zero), maxRelDiff(zero);
     for (auto const state : relevantStates) {
         auto const [lower, upper] = getLowerUpperBound(state);
-        ValueType absDiff = upper - lower;
-        ValueType relDiff;
-        if (storm::utility::isZero(lower)) {
-            relDiff = storm::utility::isZero(upper) ? storm::utility::zero<ValueType>() : storm::utility::one<ValueType>();
+        ExtendedValueType absDiff = (upper == lower) ? zero : (upper - lower);  // inf-inf undefined!
+        ExtendedValueType relDiff;
+        if (absDiff == zero) {
+            relDiff = zero;
+        } else if (lower == zero || absDiff.isPositiveInfinity()) {
+            relDiff = ExtendedValueType::posInfinity();
         } else {
-            relDiff = absDiff / lower;
+            ValueType relDiffValue = absDiff.getValue() / lower.getValue();
+            relDiff = ExtendedValueType(relDiffValue < storm::utility::zero<ValueType>() ? -relDiffValue : relDiffValue);
         }
-        maxAbsDiff &= absDiff;
-        maxRelDiff &= relDiff;
+        maxAbsDiff = maxAbsDiff.template optimum<storm::OptimizationDirection::Maximize>(absDiff);
+        maxRelDiff = maxRelDiff.template optimum<storm::OptimizationDirection::Maximize>(relDiff);
     }
     auto printIntervalWidth([&](auto const& value, auto const& name) {
         ss << "\n\t" << name << " interval width: " << value;
         if (storm::NumberTraits<ValueType>::IsExact) {
-            ss << " (approx. " << storm::utility::convertNumber<double>(value) << ")";
+            ss << " (approx. " << value.asDouble() << ")";
         }
         if (numStates > 1) {
             ss << " (showing maximum over " << numStates << " relevant states)";
         }
     });
-    printIntervalWidth(*maxAbsDiff, "Absolute");
-    printIntervalWidth(*maxRelDiff, "Relative");
+    printIntervalWidth(maxAbsDiff, "Absolute");
+    printIntervalWidth(maxRelDiff, "Relative");
     return ss.str();
 }
 
@@ -322,7 +354,7 @@ std::unique_ptr<Certificate<ValueType>> ReachabilityRewardCertificate<ValueType>
 }
 
 template<typename ValueType>
-void ReachabilityRewardCertificate<ValueType>::setLowerBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks) {
+void ReachabilityRewardCertificate<ValueType>::setLowerBoundsCertificate(std::vector<ExtendedValueType>&& values, std::vector<RankingType>&& ranks) {
     STORM_LOG_ASSERT(values.size() == targetStates.size(), "Values for lower bound certificate have incorrect dimension.");
     STORM_LOG_ASSERT(ranks.size() == targetStates.size(), "Ranks for lower bound certificate have incorrect dimension.");
     lowerBoundsCertificate.values = std::move(values);
@@ -330,7 +362,7 @@ void ReachabilityRewardCertificate<ValueType>::setLowerBoundsCertificate(std::ve
 }
 
 template<typename ValueType>
-void ReachabilityRewardCertificate<ValueType>::setUpperBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks) {
+void ReachabilityRewardCertificate<ValueType>::setUpperBoundsCertificate(std::vector<ExtendedValueType>&& values, std::vector<RankingType>&& ranks) {
     STORM_LOG_ASSERT(values.size() == targetStates.size(), "Values for upper bound certificate have incorrect dimension.");
     STORM_LOG_ASSERT(ranks.size() == targetStates.size(), "Ranks for lower bound certificate have incorrect dimension.");
     upperBoundsCertificate.values = std::move(values);

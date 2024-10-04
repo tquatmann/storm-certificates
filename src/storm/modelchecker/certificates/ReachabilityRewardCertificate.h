@@ -5,6 +5,7 @@
 #include "storm/modelchecker/certificates/RankingType.h"
 #include "storm/solver/OptimizationDirection.h"
 #include "storm/storage/BitVector.h"
+#include "storm/utility/ExtendedNumber.h"
 
 namespace storm {
 
@@ -22,6 +23,8 @@ namespace modelchecker {
 template<typename ValueType>
 class ReachabilityRewardCertificate : public Certificate<ValueType> {
    public:
+    using ExtendedValueType = storm::Extended<ValueType>;
+
     ReachabilityRewardCertificate(std::optional<storm::OptimizationDirection> dir, storm::storage::BitVector targetStates,
                                   std::vector<ValueType> stateActionRewardVector, std::string targetLabel = "goal", std::string rewardModelName = "");
     virtual ~ReachabilityRewardCertificate() = default;
@@ -32,8 +35,8 @@ class ReachabilityRewardCertificate : public Certificate<ValueType> {
     virtual std::string summaryString(storm::storage::BitVector const& relevantStates) const override;
     virtual std::unique_ptr<Certificate<ValueType>> clone() const override;
 
-    void setLowerBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks);
-    void setUpperBoundsCertificate(std::vector<ValueType>&& values, std::vector<RankingType>&& ranks);
+    void setLowerBoundsCertificate(std::vector<ExtendedValueType>&& values, std::vector<RankingType>&& ranks);
+    void setUpperBoundsCertificate(std::vector<ExtendedValueType>&& values, std::vector<RankingType>&& ranks);
 
     bool hasLowerBoundsCertificate() const;
     bool hasUpperBoundsCertificate() const;
@@ -48,12 +51,12 @@ class ReachabilityRewardCertificate : public Certificate<ValueType> {
     std::optional<storm::OptimizationDirection> const dir;
 
     struct {
-        std::vector<ValueType> values;
+        std::vector<ExtendedValueType> values;
         std::vector<RankingType> ranks;
     } upperBoundsCertificate;
 
     struct {
-        std::vector<ValueType> values;
+        std::vector<ExtendedValueType> values;
         std::vector<RankingType> ranks;
     } lowerBoundsCertificate;
 };
