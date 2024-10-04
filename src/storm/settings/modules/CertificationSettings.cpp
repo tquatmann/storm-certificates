@@ -18,7 +18,7 @@ CertificationSettings::CertificationSettings() : ModuleSettings(moduleName) {
 
     this->addOption(
         storm::settings::OptionBuilder(moduleName, useTopologicalOption, false, "If set, uses topological methods to produce certificates.").build());
-    std::vector<std::string> const methodNames = {"fp-ii", "fp-smoothii", "ex-pi"};
+    std::vector<std::string> const methodNames = {"fp-ii", "fp-smoothii", "fp-roundii", "ex-pi"};
     this->addOption(storm::settings::OptionBuilder(moduleName, methodOption, true, "The method to use for certification.")
                         .addArgument(storm::settings::ArgumentBuilder::createStringArgument("name", "The name of the method to use.")
                                          .setDefaultValueString("fp-ii")

@@ -1,5 +1,6 @@
 #include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
 
+#include <cfenv>
 #include <vector>
 
 #include "storm/adapters/RationalNumberAdapter.h"
@@ -41,7 +42,7 @@ struct LowerUpperValueCertificateComputerReturnType {
 template<typename ValueType, bool Nondeterministic, storm::OptimizationDirection Dir>
 class LowerUpperValueCertificateComputer {
    public:
-    enum class AlgorithmType { FpII, FpSmoothII, ExPI };
+    enum class AlgorithmType { FpII, FpSmoothII, FpRoundII, ExPI };
     struct Algorithm {
         AlgorithmType type;
         ValueType gamma;
@@ -61,6 +62,8 @@ class LowerUpperValueCertificateComputer {
             algType = AlgorithmType::FpII;
         } else if (algStr == "fp-smoothii") {
             algType = AlgorithmType::FpSmoothII;
+        } else if (algStr == "fp-roundii") {
+            algType = AlgorithmType::FpRoundII;
         } else {
             assert(algStr == "ex-pi");
             algType = AlgorithmType::ExPI;
@@ -121,9 +124,8 @@ class LowerUpperValueCertificateComputer {
                          "Negative rewards are not supported.");
 
         // Initialize second vector for upper bounds (if needed by the selected algorithm)
-        if (alg.type == AlgorithmType::FpII || alg.type == AlgorithmType::FpSmoothII) {
+        if (alg.type == AlgorithmType::FpII || alg.type == AlgorithmType::FpSmoothII || alg.type == AlgorithmType::FpRoundII) {
             globalUpperValues = globalLowerValues;
-
         } else {
             STORM_LOG_ASSERT(alg.type == AlgorithmType::ExPI, "Unsupported algorithm.");
             globalUpperValues.clear();  // Do not use upper values for this.
@@ -223,7 +225,7 @@ class LowerUpperValueCertificateComputer {
     }
 
     template<typename VT, bool SingleValue>
-    SubsystemData<VT, SingleValue> initializeSubsystemData(storm::storage::BitVector const& subsystem, bool const computeInitialBounds) const {
+    SubsystemData<VT, SingleValue> initializeSubsystemData(storm::storage::BitVector const& subsystem, AlgorithmType const algorithmType) const {
         auto optionalSubsystemChoices = getSubsystemChoicesIfNonTrivial(subsystem);
         auto result = SubsystemData<VT, SingleValue>{getSubsystemMatrix<VT>(subsystem, optionalSubsystemChoices), {}, {}, {}, {}, {}};
         result.exitChoices = getSubsystemExitChoices(subsystem, result.transitions.getRowCount(), optionalSubsystemChoices);
@@ -235,6 +237,8 @@ class LowerUpperValueCertificateComputer {
             result.offsets = {getSubsystemOffsets<VT>(subsystem, result.exitChoices, globalLowerValues),
                               getSubsystemOffsets<VT>(subsystem, result.exitChoices, globalUpperValues)};
         }
+        bool const computeInitialBounds =
+            algorithmType == AlgorithmType::FpII || algorithmType == AlgorithmType::FpSmoothII || algorithmType == AlgorithmType::FpRoundII;
         if (computeInitialBounds) {
             result.exitProbabilities = getSubsystemExitProbabilities<VT>(subsystem, result.exitChoices);
         }
@@ -260,6 +264,21 @@ class LowerUpperValueCertificateComputer {
             } else {
                 result.operands = {std::vector<VT>(result.transitions.getRowGroupCount(), storm::utility::zero<VT>()),
                                    std::vector<VT>(result.transitions.getRowGroupCount(), storm::utility::zero<VT>())};
+            }
+        }
+        bool const invertLowerValues = algorithmType == AlgorithmType::FpRoundII;
+        if (invertLowerValues) {
+            auto invertVector = [](auto& vector) {
+                for (auto& value : vector) {
+                    value = -value;
+                }
+            };
+            if constexpr (SingleValue) {
+                invertVector(result.operands);
+                invertVector(result.offsets);
+            } else {
+                invertVector(result.operands.first);
+                invertVector(result.offsets.first);
             }
         }
 
@@ -312,7 +331,8 @@ class LowerUpperValueCertificateComputer {
 
     template<typename VT>
     void setGlobalValuesFromSubsystemVector(storm::storage::BitVector const& subsystemStates, std::vector<VT> const& localValues,
-                                            std::vector<ValueType>& globalValues, std::optional<std::vector<uint64_t>> const& reducedStateMapping) {
+                                            std::vector<ValueType>& globalValues, std::optional<std::vector<uint64_t>> const& reducedStateMapping,
+                                            bool invert) {
         STORM_LOG_ASSERT(subsystemStates.size() == globalValues.size(), "Unexpected number of values.");
         if (reducedStateMapping) {
             STORM_LOG_ASSERT(subsystemStates.getNumberOfSetBits() == reducedStateMapping->size(), "Unexpected number of states in unreduced subsystem.");
@@ -321,6 +341,9 @@ class LowerUpperValueCertificateComputer {
                 auto const reducedSubsystemState = reducedStateMapping->at(unreducedSubsystemState);
                 STORM_LOG_ASSERT(reducedSubsystemState < localValues.size(), "unexpeced index in reduced subsystem.");
                 globalValues[globalState] = storm::utility::convertNumber<ValueType>(localValues[reducedSubsystemState]);
+                if (invert) {
+                    globalValues[globalState] = -globalValues[globalState];
+                }
                 ++unreducedSubsystemState;
             }
         } else {
@@ -328,21 +351,26 @@ class LowerUpperValueCertificateComputer {
             auto localValuesIt = localValues.cbegin();
             for (auto i : subsystemStates) {
                 globalValues[i] = storm::utility::convertNumber<ValueType>(*localValuesIt);
+                if (invert) {
+                    globalValues[i] = -globalValues[i];
+                }
                 ++localValuesIt;
             }
         }
     }
 
     template<typename VT, bool SingleValue>
-    void setGlobalValuesFromSubsystem(storm::storage::BitVector const& subsystemStates, SubsystemData<VT, SingleValue> const& subsystemData) {
+    void setGlobalValuesFromSubsystem(storm::storage::BitVector const& subsystemStates, SubsystemData<VT, SingleValue> const& subsystemData,
+                                      bool invertLowerValues) {
         if constexpr (SingleValue) {
-            setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands, globalLowerValues, subsystemData.originalToReducedStateMapping);
+            setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands, globalLowerValues, subsystemData.originalToReducedStateMapping,
+                                                   invertLowerValues);
             STORM_LOG_ASSERT(globalUpperValues.empty(), "Expected upper values not to be initialized.");
         } else {
             setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands.first, globalLowerValues,
-                                                   subsystemData.originalToReducedStateMapping);
+                                                   subsystemData.originalToReducedStateMapping, invertLowerValues);
             setGlobalValuesFromSubsystemVector<VT>(subsystemStates, subsystemData.operands.second, globalUpperValues,
-                                                   subsystemData.originalToReducedStateMapping);
+                                                   subsystemData.originalToReducedStateMapping, false);
         }
     }
 
@@ -392,7 +420,7 @@ class LowerUpperValueCertificateComputer {
     void computeForSubsystemFpII(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, double, ValueType>;  // VT is imprecise
         std::optional<storm::OptimizationDirection> constexpr optionalDir = Nondeterministic ? std::optional<storm::OptimizationDirection>(Dir) : std::nullopt;
-        auto subsystemData = initializeSubsystemData<VT, false>(subsystemStates, true);
+        auto subsystemData = initializeSubsystemData<VT, false>(subsystemStates, alg.type);
 
         auto viOp = std::make_shared<storm::solver::helper::ValueIterationOperator<VT, !Nondeterministic>>();
         viOp->setMatrixBackwards(subsystemData.transitions);
@@ -401,19 +429,25 @@ class LowerUpperValueCertificateComputer {
         if (alg.type == AlgorithmType::FpII) {
             iiHelper.II(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
                         optionalDir);  // TODO: relevant values?
+        } else if (alg.type == AlgorithmType::FpRoundII) {
+            auto const oldRound = std::fegetround();
+            std::fesetround(FE_UPWARD);
+            iiHelper.roundII(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
+                             optionalDir);  // TODO: relevant values?
+            std::fesetround(oldRound);
         } else {
             STORM_LOG_ASSERT(alg.type == AlgorithmType::FpSmoothII, "Unsupported algorithm.");
             iiHelper.smoothII(subsystemData.operands, subsystemData.offsets, numIterations, relative, storm::utility::convertNumber<VT>(precision),
                               storm::utility::convertNumber<VT>(alg.gamma), storm::utility::convertNumber<VT>(alg.delta),
                               optionalDir);  // TODO: relevant values?
         }
-        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData, alg.type == AlgorithmType::FpRoundII);
     }
 
     void computeForSubsystemExPI(storm::storage::BitVector const& subsystemStates) {
         using VT = std::conditional_t<storm::NumberTraits<ValueType>::IsExact, ValueType, storm::RationalNumber>;  // VT is exact
 
-        auto subsystemData = initializeSubsystemData<VT, true>(subsystemStates, false);
+        auto subsystemData = initializeSubsystemData<VT, true>(subsystemStates, AlgorithmType::ExPI);
 
         storm::Environment env;
         env.solver().minMax().setMethod(storm::solver::MinMaxMethod::ViToPi);
@@ -469,13 +503,14 @@ class LowerUpperValueCertificateComputer {
             // TODO: relevant values?
             solver->solveEquations(env, subsystemData.operands, subsystemData.offsets);
         }
-        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData);
+        setGlobalValuesFromSubsystem<VT>(subsystemStates, subsystemData, false);
     }
 
     void computeForSubsystem(Algorithm const& alg, bool relative, ValueType const& precision, storm::storage::BitVector const& subsystemStates) {
         switch (alg.type) {
             case AlgorithmType::FpII:
             case AlgorithmType::FpSmoothII:
+            case AlgorithmType::FpRoundII:
                 computeForSubsystemFpII(alg, relative, precision, subsystemStates);
                 break;
             case AlgorithmType::ExPI:
