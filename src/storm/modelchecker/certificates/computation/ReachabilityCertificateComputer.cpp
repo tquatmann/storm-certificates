@@ -1,4 +1,4 @@
-#include "storm/modelchecker/certificates/computation/ReachabilityProbabilityCertificateComputer.h"
+#include "storm/modelchecker/certificates/computation/ReachabilityCertificateComputer.h"
 
 #include <cfenv>
 #include <vector>
