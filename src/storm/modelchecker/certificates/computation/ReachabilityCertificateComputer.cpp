@@ -303,7 +303,7 @@ class LowerUpperValueCertificateComputer {
             // No ECs to eliminate
             return std::move(original);
         }
-        auto reductionRes = storm::transformer::EndComponentEliminator<VT>::transform(original.transitions, ecs, allStates, allStates, false);
+        auto reductionRes = storm::transformer::EndComponentEliminator<VT>::transform(original.transitions, ecs, allStates, ~allStates, false);
         SubsystemData<VT, SingleValue> reduced{
             std::move(reductionRes.matrix), std::move(reductionRes.sinkRows), {}, {}, {}, std::move(reductionRes.oldToNewStateMapping)};
         if constexpr (SingleValue) {
