@@ -17,10 +17,9 @@ IntervalIterationHelper<ValueType, TrivialRowGrouping>::IntervalIterationHelper(
     // Intentionally left empty.
 }
 
-template<typename ValueType, OptimizationDirection Dir, bool Smooth, bool InvertXDir>
+template<typename ValueType, OptimizationDirection Dir, bool Smooth, bool RoundingTowardsInf>
 class IIBackend {
    public:
-    static_assert(!Smooth || !InvertXDir, "Smooth interval iteration with inverted x direction is not supported.");
     IIBackend(ValueType const& gamma, ValueType const& delta) : gamma(gamma), delta(delta) {}
     IIBackend() : gamma(0.0), delta(0.0) {
         STORM_LOG_ASSERT(!Smooth, "Gamma and delta must be set for smooth interval iteration.");
@@ -40,26 +39,33 @@ class IIBackend {
 
     void applyUpdate(ValueType& xCurr, ValueType& yCurr, [[maybe_unused]] uint64_t rowGroup) {
         if constexpr (Smooth) {
-            if (*xBest > xCurr) {
-                auto const diff = *xBest - xCurr;
-                xCurr = *xBest - gamma * diff;  // = gamma * xCurr + (1-gamma) * xBest
-                if constexpr (std::is_same_v<ValueType, double>) {
-                    if (xCurr == *xBest) {
-                        xCurr = std::nextafter(xCurr, xCurr - 1.0);
+            if constexpr (RoundingTowardsInf) {
+                if (*xBest < xCurr) {
+                    auto const diff = xCurr - *xBest;
+                    xCurr = *xBest + gamma * diff;  // = gamma * xCurr + (1-gamma) * xBest
+                }
+            } else {
+                if (*xBest > xCurr) {
+                    auto const diff = *xBest - xCurr;
+                    xCurr = *xBest - gamma * diff;  // = gamma * xCurr + (1-gamma) * xBest
+                    if constexpr (std::is_same_v<ValueType, double>) {
+                        if (xCurr == *xBest) {
+                            xCurr = std::nextafter(xCurr, xCurr - 1.0);
+                        }
                     }
                 }
             }
             if (*yBest < yCurr) {
                 auto const diff = yCurr - *yBest;
                 yCurr = *yBest + gamma * diff;  // = gamma * yCurr + (1-gamma) * yBest
-                if constexpr (std::is_same_v<ValueType, double>) {
+                if constexpr (!RoundingTowardsInf && std::is_same_v<ValueType, double>) {
                     if (yCurr == *yBest) {
                         yCurr = std::nextafter(yCurr, yCurr + 1.0);
                     }
                 }
             }
         } else {
-            if constexpr (InvertXDir) {
+            if constexpr (RoundingTowardsInf) {
                 xCurr = std::min(xCurr, *xBest);
             } else {
                 xCurr = std::max(xCurr, *xBest);
@@ -81,17 +87,17 @@ class IIBackend {
     }
 
    private:
-    storm::utility::Extremum<InvertXDir ? storm::solver::invert(Dir) : Dir, ValueType> xBest;
+    storm::utility::Extremum<RoundingTowardsInf ? storm::solver::invert(Dir) : Dir, ValueType> xBest;
     storm::utility::Extremum<Dir, ValueType> yBest;
     ValueType const gamma, delta;
 };
 
-template<typename ValueType, bool InvertXDir>
+template<typename ValueType, bool RoundingTowardsInf>
 bool checkConvergence(std::pair<std::vector<ValueType>, std::vector<ValueType>> const& xy, uint64_t& convergenceCheckState,
                       std::function<void()> const& getNextConvergenceCheckState, bool relative, ValueType const& precision) {
     if (relative) {
         for (; convergenceCheckState < xy.first.size(); getNextConvergenceCheckState()) {
-            ValueType const& l = InvertXDir ? -xy.first[convergenceCheckState] : xy.first[convergenceCheckState];
+            ValueType const& l = RoundingTowardsInf ? -xy.first[convergenceCheckState] : xy.first[convergenceCheckState];
             ValueType const& u = xy.second[convergenceCheckState];
             if (l > storm::utility::zero<ValueType>()) {
                 if ((u - l) > l * precision) {
@@ -118,7 +124,7 @@ bool checkConvergence(std::pair<std::vector<ValueType>, std::vector<ValueType>> 
 }
 
 template<typename ValueType, bool TrivialRowGrouping>
-template<OptimizationDirection Dir, typename OffsetType, bool Smooth, bool InvertXDir>
+template<OptimizationDirection Dir, typename OffsetType, bool Smooth, bool RoundingTowardsInf>
 SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
                                                                         OffsetType const& offsets, uint64_t& numIterations, bool relative,
                                                                         ValueType const& precision,
@@ -126,7 +132,7 @@ SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pai
                                                                         std::optional<storm::storage::BitVector> const& relevantValues, ValueType const& gamma,
                                                                         ValueType const& delta) const {
     SolverStatus status{SolverStatus::InProgress};
-    IIBackend<ValueType, Dir, Smooth, InvertXDir> backend(gamma, delta);
+    IIBackend<ValueType, Dir, Smooth, RoundingTowardsInf> backend(gamma, delta);
     uint64_t convergenceCheckState = 0;
     std::function<void()> getNextConvergenceCheckState;
     if (relevantValues) {
@@ -140,7 +146,7 @@ SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::II(std::pai
     while (status == SolverStatus::InProgress) {
         ++numIterations;
         viOperator->template applyInPlace(xy, offsets, backend);
-        if (checkConvergence<ValueType, InvertXDir>(xy, convergenceCheckState, getNextConvergenceCheckState, relative, precision)) {
+        if (checkConvergence<ValueType, RoundingTowardsInf>(xy, convergenceCheckState, getNextConvergenceCheckState, relative, precision)) {
             status = SolverStatus::Converged;
         } else if (iterationCallback) {
             status = iterationCallback(IIData<ValueType>({xy.first, xy.second, status}));
@@ -167,15 +173,26 @@ template<typename ValueType, bool TrivialRowGrouping>
 SolverStatus IntervalIterationHelper<ValueType, TrivialRowGrouping>::roundII(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
                                                                              std::pair<std::vector<ValueType>, std::vector<ValueType>> const& offsets,
                                                                              uint64_t& numIterations, bool relative, ValueType const& precision,
+                                                                             ValueType const& gamma, ValueType const& delta,
                                                                              std::optional<storm::OptimizationDirection> const& dir,
                                                                              std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback,
                                                                              std::optional<storm::storage::BitVector> const& relevantValues) const {
-    if (!dir.has_value() || maximize(*dir)) {
-        return II<OptimizationDirection::Maximize, decltype(offsets), false, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
-                                                                                   relevantValues);
+    if (storm::utility::isZero(gamma)) {
+        if (!dir.has_value() || maximize(*dir)) {
+            return II<OptimizationDirection::Maximize, decltype(offsets), false, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
+                                                                                       relevantValues);
+        } else {
+            return II<OptimizationDirection::Minimize, decltype(offsets), false, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
+                                                                                       relevantValues);
+        }
     } else {
-        return II<OptimizationDirection::Minimize, decltype(offsets), false, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
-                                                                                   relevantValues);
+        if (!dir.has_value() || maximize(*dir)) {
+            return II<OptimizationDirection::Maximize, decltype(offsets), true, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
+                                                                                      relevantValues, gamma, delta);
+        } else {
+            return II<OptimizationDirection::Minimize, decltype(offsets), true, true>(xy, offsets, numIterations, relative, precision, iterationCallback,
+                                                                                      relevantValues, gamma, delta);
+        }
     }
 }
 

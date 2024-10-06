@@ -40,7 +40,8 @@ class IntervalIterationHelper {
 
     SolverStatus roundII(std::pair<std::vector<ValueType>, std::vector<ValueType>>& xy,
                          std::pair<std::vector<ValueType>, std::vector<ValueType>> const& offsets, uint64_t& numIterations, bool relative,
-                         ValueType const& precision, std::optional<storm::OptimizationDirection> const& dir = {},
+                         ValueType const& precision, ValueType const& gamma, ValueType const& delta,
+                         std::optional<storm::OptimizationDirection> const& dir = {},
                          std::function<SolverStatus(IIData<ValueType> const&)> const& iterationCallback = {},
                          std::optional<storm::storage::BitVector> const& relevantValues = {}) const;
 
