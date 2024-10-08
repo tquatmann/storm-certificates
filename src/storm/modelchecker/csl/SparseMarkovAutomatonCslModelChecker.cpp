@@ -339,7 +339,6 @@ std::unique_ptr<CheckResult> SparseMarkovAutomatonCslModelChecker<SparseMarkovAu
                 timeRewards[this->getModel().getTransitionMatrix().getRowGroupIndices()[markovianState]] =
                     storm::utility::one<ValueType>() / this->getModel().getExitRate(markovianState);
             }
-            storm::utility::vector::setVectorValues(timeRewards, this->getModel().getMarkovianStates(), storm::utility::one<ValueType>());
             auto certificate = storm::modelchecker::computeReachabilityRewardCertificate(
                 env, checkTask.getOptimizationDirection(), this->getModel().getTransitionMatrix(), subResult.getTruthValuesVector(), std::move(timeRewards),
                 eventuallyFormula.getSubformula().toString(), "time");
