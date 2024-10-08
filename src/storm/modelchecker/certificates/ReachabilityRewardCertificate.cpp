@@ -263,6 +263,7 @@ void ReachabilityRewardCertificate<ValueType>::exportToStream(std::ostream& out)
         out << " " << i;
     }
     out << "\n";
+    out << "vectors\n";
 
     auto rankToStream = [&out](RankingType r) {
         if (r == InfRank) {

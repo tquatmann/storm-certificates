@@ -246,6 +246,7 @@ void ReachabilityProbabilityCertificate<ValueType>::exportToStream(std::ostream&
         }
         out << "\n";
     }
+    out << "vectors\n";
 
     // State values
     for (uint64_t i = 0; i < targetStates.size(); ++i) {
